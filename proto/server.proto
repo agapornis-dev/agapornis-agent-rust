@@ -1,0 +1,113 @@
+syntax = "proto3";
+package agapornis.v1;
+
+service ServerManagement {
+  rpc CreateServer (CreateServerRequest) returns (CreateServerResponse);
+  rpc StartServer (ServerActionRequest) returns (ServerActionResponse);
+  rpc StopServer (ServerActionRequest) returns (ServerActionResponse);
+  rpc RestartServer (ServerActionRequest) returns (ServerActionResponse);
+  rpc DeleteServer (ServerActionRequest) returns (ServerActionResponse);
+  rpc UpdateServerResources (UpdateServerResourcesRequest) returns (ServerActionResponse);
+  rpc GetNodeStats (NodeStatsRequest) returns (NodeStatsResponse);
+  rpc GetCrowdSecAlerts (CrowdSecAlertsRequest) returns (CrowdSecAlertsResponse);
+  rpc GetServerStats (ServerActionRequest) returns (ServerMetricsResponse);
+  rpc SendCommand (SendCommandRequest) returns (ServerActionResponse);
+  rpc TestDatabaseConnection (DatabaseConnectionTestRequest) returns (DatabaseConnectionTestResponse);
+  rpc StreamConsole (ServerActionRequest) returns (stream ConsoleMessage);
+  rpc GetUpdateStatus (UpdateStatusRequest) returns (UpdateStatusResponse);
+  rpc ApplyUpdate (ApplyUpdateRequest) returns (ApplyUpdateResponse);
+  rpc InstallCertificate (InstallCertificateRequest) returns (CertificateActionResponse);
+  rpc RollbackCertificate (RollbackCertificateRequest) returns (CertificateActionResponse);
+}
+
+service FileManagement {
+  rpc UploadFile (stream UploadFileRequest) returns (FileActionResponse);
+  rpc DeleteFileOrDirectory (DeleteFileRequest) returns (FileActionResponse);
+  rpc DownloadFile (DownloadFileRequest) returns (stream DownloadFileResponse);
+  rpc ListDirectory (ListDirectoryRequest) returns (ListDirectoryResponse);
+  rpc ReadFileContent (ReadFileRequest) returns (ReadFileResponse);
+  rpc WriteFileContent (WriteFileRequest) returns (FileActionResponse);
+  rpc RenameFileOrDirectory (RenameFileRequest) returns (FileActionResponse);
+  rpc ExtractArchive (ExtractArchiveRequest) returns (FileActionResponse);
+}
+
+service BackupManagement {
+  rpc CreateBackup (CreateBackupRequest) returns (CreateBackupResponse);
+  rpc ListBackups (ListBackupsRequest) returns (ListBackupsResponse);
+  rpc DeleteBackup (DeleteBackupRequest) returns (BackupActionResponse);
+  rpc RestoreBackup (RestoreBackupRequest) returns (BackupActionResponse);
+  rpc DownloadBackup (DownloadBackupRequest) returns (stream DownloadBackupResponse);
+  rpc VerifyBackup (VerifyBackupRequest) returns (BackupActionResponse);
+}
+
+service NodeTransfer {
+  rpc ExportServer (ExportServerRequest) returns (stream ExportServerResponse);
+  rpc ImportServer (stream ImportServerRequest) returns (ImportServerResponse);
+  rpc DeleteLocalBackups (ServerActionRequest) returns (ServerActionResponse);
+}
+
+message CreateServerRequest {
+  string server_id = 1; string docker_image = 2; string internal_port = 3;
+  repeated string env_vars = 4; int64 memory_bytes = 5; int32 cpu_limit_percentage = 6;
+  string startup_command = 7; int64 disk_limit_bytes = 8; double cpu_cores = 9;
+  string install_image = 10; string install_entrypoint = 11; string install_script = 12;
+  string config_files_json = 13; int32 host_port = 14; string network_owner_id = 15;
+  bool expose_public_port = 16;
+}
+message CreateServerResponse { bool success = 1; int32 assigned_host_port = 2; string error_message = 3; }
+message ServerActionRequest { string server_id = 1; }
+message ServerActionResponse { bool success = 1; string error_message = 2; }
+message UpdateServerResourcesRequest { string server_id = 1; int64 memory_bytes = 2; int32 cpu_limit_percentage = 3; double cpu_cores = 4; int64 disk_limit_bytes = 5; }
+message ServerMetricsResponse { int64 memory_usage_bytes = 1; int64 memory_limit_bytes = 2; double cpu_percentage = 3; int64 network_read_bytes = 4; int64 network_write_bytes = 5; int64 disk_usage_bytes = 6; int64 disk_limit_bytes = 7; string status = 8; }
+message NodeStatsRequest {}
+message NodeStatsResponse { double cpu_percentage = 1; int64 memory_usage_bytes = 2; int64 memory_total_bytes = 3; int64 disk_usage_bytes = 4; int64 disk_total_bytes = 5; string status = 6; string error_message = 7; int64 uptime_seconds = 8; int32 cpu_count = 9; }
+message CrowdSecAlertsRequest {}
+message CrowdSecAlert { string id = 1; string created_at = 2; string scenario = 3; string message = 4; string source_scope = 5; string source_value = 6; string source_ip = 7; string source_country = 8; string source_as_name = 9; int32 events_count = 10; bool simulated = 11; bool remediation = 12; string decision_type = 13; string decision_duration = 14; }
+message CrowdSecAlertsResponse { bool enabled = 1; bool supported = 2; string status = 3; string error_message = 4; string collected_at = 5; repeated CrowdSecAlert alerts = 6; }
+message SendCommandRequest { string server_id = 1; string command = 2; }
+message DatabaseConnectionTestRequest { string server_id = 1; string database_type = 2; string host = 3; int32 port = 4; string database_name = 5; string username = 6; string password = 7; string docker_image = 8; }
+message DatabaseConnectionTestResponse { bool success = 1; string error_message = 2; int64 latency_ms = 3; }
+message ConsoleMessage { string log_line = 1; }
+message UpdateStatusRequest {}
+message UpdateStatusResponse { string version = 1; string runtime_identifier = 2; string executable_path = 3; string staging_directory = 4; bool restart_required = 5; string pending_artifact = 6; }
+message ApplyUpdateRequest { string artifact_url = 1; string sha256 = 2; }
+message ApplyUpdateResponse { bool success = 1; string message = 2; string staged_path = 3; bool restart_required = 4; }
+
+message UploadFileRequest { oneof data { UploadMetadata metadata = 1; bytes chunk_data = 2; } }
+message UploadMetadata { string server_id = 1; string target_path = 2; }
+message DeleteFileRequest { string server_id = 1; string target_path = 2; }
+message FileActionResponse { bool success = 1; string error_message = 2; }
+message DownloadFileRequest { string server_id = 1; string target_path = 2; }
+message DownloadFileResponse { bytes chunk_data = 1; }
+message ListDirectoryRequest { string server_id = 1; string target_path = 2; }
+message FileItem { string name = 1; bool is_directory = 2; int64 size = 3; string last_modified = 4; }
+message ListDirectoryResponse { repeated FileItem items = 1; }
+message ReadFileRequest { string server_id = 1; string target_path = 2; }
+message ReadFileResponse { string content = 1; }
+message WriteFileRequest { string server_id = 1; string target_path = 2; string content = 3; }
+message RenameFileRequest { string server_id = 1; string target_path = 2; string new_name = 3; }
+message ExtractArchiveRequest { string server_id = 1; string target_path = 2; string destination_path = 3; }
+
+message CreateBackupRequest { string server_id = 1; string storage = 2; int32 retention_count = 3; bool encrypt = 4; }
+message CreateBackupResponse { bool success = 1; string backup_id = 2; string error_message = 3; int64 size_bytes = 4; string checksum_sha256 = 5; string checksum_type = 6; string storage = 7; bool encrypted = 8; }
+message ListBackupsRequest { string server_id = 1; bool include_remote = 2; }
+message BackupEntry { string backup_id = 1; int64 size_bytes = 2; string created_at = 3; string checksum_sha256 = 4; string checksum_type = 5; string storage = 6; bool encrypted = 7; string last_verified_at = 8; string expires_at = 9; }
+message ListBackupsResponse { repeated BackupEntry backups = 1; }
+message DeleteBackupRequest { string server_id = 1; string backup_id = 2; string storage = 3; }
+message BackupActionResponse { bool success = 1; string error_message = 2; }
+message RestoreBackupRequest { string server_id = 1; string backup_id = 2; string expected_checksum_sha256 = 3; string storage = 4; }
+message DownloadBackupRequest { string server_id = 1; string backup_id = 2; string storage = 3; }
+message VerifyBackupRequest { string server_id = 1; string backup_id = 2; string storage = 3; }
+message DownloadBackupResponse { bytes chunk_data = 1; string backup_id = 2; int64 size_bytes = 3; string checksum_sha256 = 4; string checksum_type = 5; }
+
+message ExportServerRequest { string server_id = 1; TransferPayload payload = 2; }
+message ExportServerResponse { oneof data { ExportMetadata metadata = 1; bytes chunk_data = 2; } }
+message ExportMetadata { string server_id = 1; int64 archive_size_bytes = 2; TransferPayload payload = 3; }
+message ImportServerRequest { oneof data { ImportMetadata metadata = 1; bytes chunk_data = 2; } }
+message ImportMetadata { string server_id = 1; TransferPayload payload = 2; int64 archive_size_bytes = 3; }
+message ImportServerResponse { bool success = 1; string error_message = 2; }
+enum TransferPayload { SERVER_DATA = 0; LOCAL_BACKUPS = 1; }
+
+message InstallCertificateRequest { string certificate_pem = 1; string private_key_pem = 2; string ca_certificate_pem = 3; string expected_fingerprint = 4; }
+message RollbackCertificateRequest {}
+message CertificateActionResponse { bool success = 1; string fingerprint = 2; string error_message = 3; }

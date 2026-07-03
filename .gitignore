@@ -1,0 +1,6 @@
+/target/
+/target-linux/
+/.cargo-linux/
+/.env
+/config.json
+/certs/
