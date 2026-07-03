@@ -29,6 +29,7 @@ service FileManagement {
   rpc WriteFileContent (WriteFileRequest) returns (FileActionResponse);
   rpc RenameFileOrDirectory (RenameFileRequest) returns (FileActionResponse);
   rpc ExtractArchive (ExtractArchiveRequest) returns (FileActionResponse);
+  rpc InstallModpack (InstallModpackRequest) returns (FileActionResponse);
 }
 
 service BackupManagement {
@@ -87,6 +88,7 @@ message ReadFileResponse { string content = 1; }
 message WriteFileRequest { string server_id = 1; string target_path = 2; string content = 3; }
 message RenameFileRequest { string server_id = 1; string target_path = 2; string new_name = 3; }
 message ExtractArchiveRequest { string server_id = 1; string target_path = 2; string destination_path = 3; }
+message InstallModpackRequest { string server_id = 1; string target_path = 2; }
 
 message CreateBackupRequest { string server_id = 1; string storage = 2; int32 retention_count = 3; bool encrypt = 4; }
 message CreateBackupResponse { bool success = 1; string backup_id = 2; string error_message = 3; int64 size_bytes = 4; string checksum_sha256 = 5; string checksum_type = 6; string storage = 7; bool encrypted = 8; }

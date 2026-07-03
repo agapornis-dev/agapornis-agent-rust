@@ -148,4 +148,14 @@ impl proto::file_management_server::FileManagement for FileService {
                 .await,
         )))
     }
+
+    async fn install_modpack(
+        &self,
+        r: Request<InstallModpackRequest>,
+    ) -> Result<Response<FileActionResponse>, Status> {
+        let r = r.into_inner();
+        Ok(Response::new(file_action(
+            self.0.files.install_mrpack(&r.server_id, &r.target_path).await,
+        )))
+    }
 }
