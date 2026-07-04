@@ -1,41 +1,63 @@
 //! Docker lifecycle, resource accounting, stats, and console attachment.
 
-use crate::{paths, process, protection::ProtectionState};
+use crate::{
+    paths,
+    process,
+    protection::ProtectionState,
+};
 use anyhow::{Context, Result, bail};
-use rand::Rng;
+use bollard::Docker;
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     net::TcpListener,
     path::{Path, PathBuf},
-    process::Stdio,
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
     fs,
-    io::AsyncWriteExt,
-    process::{Child, ChildStdin, Command},
+    io::{AsyncWrite, AsyncWriteExt},
     sync::{Mutex, Notify},
+    task::JoinHandle,
 };
 use uuid::Uuid;
 
-const DEFAULT_DISK_LIMIT: i64 = 10 * 1024 * 1024 * 1024;
+const DEFAULT_DISK_LIMIT: i64 =
+    10 * 1024 * 1024 * 1024;
 
 enum CacheState {
     Ready(Instant, i64, i64),
     Calculating(Arc<Notify>),
 }
-type DiskCache = Arc<Mutex<HashMap<String, CacheState>>>;
-type ConsoleBindings = Arc<Mutex<HashMap<String, Arc<Mutex<ConsoleBinding>>>>>;
+
+type DiskCache =
+    Arc<Mutex<HashMap<String, CacheState>>>;
+
+type ConsoleBindings = Arc<
+    Mutex<
+        HashMap<
+            String,
+            Arc<Mutex<ConsoleBinding>>,
+        >,
+    >,
+>;
 
 struct ConsoleBinding {
-    child: Child,
-    stdin: ChildStdin,
+    stdin: Pin<Box<dyn AsyncWrite + Send>>,
+    output_task: JoinHandle<()>,
+}
+
+impl Drop for ConsoleBinding {
+    fn drop(&mut self) {
+        self.output_task.abort();
+    }
 }
 
 #[derive(Clone)]
 pub struct DockerManager {
+    docker: Docker,
     protection: Arc<ProtectionState>,
     disk_cache: DiskCache,
     console_bindings: ConsoleBindings,
@@ -95,6 +117,7 @@ mod provisioning;
 
 use configuration::*;
 use database::*;
+
 pub use inspection::self_test_disk_cache;
 
 #[cfg(test)]

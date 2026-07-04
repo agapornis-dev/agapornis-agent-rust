@@ -43,11 +43,21 @@ pub struct AppState {
     pub config: DaemonConfig,
 }
 impl AppState {
-    pub async fn new(config: DaemonConfig, certificates: CertificateManager) -> Self {
-        let protection = Arc::new(ProtectionState::default());
-        let docker = Arc::new(DockerManager::new(protection.clone()));
-        let console = Arc::new(ConsoleHub::new(protection.clone()));
-        Self {
+    pub async fn new(
+        config: DaemonConfig,
+        certificates: CertificateManager,
+    ) -> anyhow::Result<Self> {
+        let protection =
+            Arc::new(ProtectionState::default());
+
+        let docker = Arc::new(
+            DockerManager::new(protection.clone())?,
+        );
+
+        let console =
+            Arc::new(ConsoleHub::new(protection.clone()));
+
+        Ok(Self {
             files: Files::new(docker.clone()),
             backups: Backups::new().await,
             update: UpdateManager,
@@ -56,7 +66,7 @@ impl AppState {
             docker,
             protection,
             console,
-        }
+        })
     }
 }
 

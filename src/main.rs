@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
     let config = DaemonConfig::load_or_setup().await?;
     info!(node=%config.node_id,"agapornis Rust agent starting");
     let certificates = CertificateManager::new(config.clone());
-    let state = AppState::new(config, certificates.clone()).await;
+    let state = AppState::new(config, certificates.clone()).await?;
     updates.schedule_health_commit();
     runtime::spawn(
         state.docker.clone(),
