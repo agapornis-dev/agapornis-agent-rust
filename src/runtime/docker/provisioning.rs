@@ -125,13 +125,16 @@ impl DockerManager {
                 format!("agapornis.network_owner_id={}", spec.network_owner_id),
             ]);
         }
-        let internal_port = effective_internal_port(&spec.internal_port, &spec.env)?;
-        if let Some(internal_port) = internal_port {
-            args.extend(port_arguments(
-                &internal_port,
-                spec.expose_public_port,
-                host_port,
-            ));
+        if spec.expose_public_port && !spec.port_mappings.is_empty() {
+            for (internal_port, mapped_host_port) in &spec.port_mappings {
+                ensure_port(*mapped_host_port as u16)?;
+                args.extend(port_arguments(internal_port, true, *mapped_host_port));
+            }
+        } else {
+            let internal_port = effective_internal_port(&spec.internal_port, &spec.env)?;
+            if let Some(internal_port) = internal_port {
+                args.extend(port_arguments(&internal_port, spec.expose_public_port, host_port));
+            }
         }
         if let Some(health_command) = database_health_command(&spec.env) {
             args.extend([

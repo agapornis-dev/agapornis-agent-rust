@@ -26,6 +26,8 @@ impl proto::server_management_server::ServerManagement for ServerService {
             host_port: r.host_port,
             network_owner_id: r.network_owner_id,
             expose_public_port: r.expose_public_port,
+            port_mappings: r.port_mappings.into_iter()
+                .map(|port| (port.internal_port, port.host_port)).collect(),
         };
         Ok(Response::new(match self.0.docker.create(spec).await {
             Ok(port) => CreateServerResponse {

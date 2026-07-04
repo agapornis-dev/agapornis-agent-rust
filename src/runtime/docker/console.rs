@@ -29,7 +29,7 @@ impl DockerManager {
             if let Some(b) = bindings.get(id) {
                 b.clone()
             } else {
-                let b = Arc::new(Mutex::new(attach_console(id)?));
+                let b = Arc::new(Mutex::new(console_binding(id, false)?));
                 bindings.insert(id.to_owned(), b.clone());
                 b
             }
@@ -37,11 +37,76 @@ impl DockerManager {
 
         let mut binding = binding_arc.lock().await;
         if binding.child.try_wait().ok().flatten().is_some() {
-            *binding = attach_console(id)?;
+            *binding = console_binding(id, false)?;
         }
 
-        binding.stdin.write_all(line.as_bytes()).await?;
-        binding.stdin.flush().await?;
+        if let Err(first_error) = async {
+            binding.stdin.write_all(line.as_bytes()).await?;
+            binding.stdin.flush().await
+        }.await {
+            *binding = console_binding(id, false)
+                .with_context(|| format!("reconnect console stdin after write failed: {first_error}"))?;
+            binding.stdin.write_all(line.as_bytes()).await?;
+            binding.stdin.flush().await?;
+        }
+        Ok(())
+    }
+
+
+
+    pub(super) async fn start_with_console(&self, id: &str) -> Result<()> {
+        paths::validate_id(id)?;
+        self.detach_console(id).await;
+        let mut binding = console_binding(id, true)?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        if let Some(status) = binding.child.try_wait()? {
+            bail!("docker start console binding exited with {status}")
+        }
+        Self::disable_console_echo(id).await;// <-- add here too
+        let binding = Arc::new(Mutex::new(binding));
+        self.console_bindings.lock().await.insert(id.to_owned(), binding);
+        Ok(())
+    }
+
+    async fn disable_console_echo(id: &str) {
+        const MAX_ATTEMPTS: u32 = 5;
+        const RETRY_DELAY: Duration = Duration::from_millis(150);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            // no `|| true` here — we want the real exit status back
+            match process::docker([
+                "exec", id, "/bin/sh", "-c",
+                "stty -echo < /proc/1/fd/0",
+            ])
+            .await
+            {
+                Ok(_) => return, // echo successfully disabled
+                Err(err) if attempt < MAX_ATTEMPTS => {
+                    tracing::debug!(
+                        "disable_console_echo attempt {attempt}/{MAX_ATTEMPTS} failed for {id}: {err}; retrying"
+                    );
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to disable console echo for container {id} after {MAX_ATTEMPTS} attempts: {err}; console output may show echoed commands"
+                    );
+                }
+            }
+        }
+    }
+
+    pub(super) async fn attach_running_console(&self, id: &str) -> Result<()> {
+        paths::validate_id(id)?;
+        self.detach_console(id).await;
+        let mut binding = console_binding(id, false)?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        if let Some(status) = binding.child.try_wait()? {
+            bail!("docker attach console binding exited with {status}")
+        }
+        Self::disable_console_echo(id).await;
+        let binding = Arc::new(Mutex::new(binding));
+        self.console_bindings.lock().await.insert(id.to_owned(), binding);
         Ok(())
     }
 
@@ -57,9 +122,13 @@ impl DockerManager {
     }
 }
 
-fn attach_console(id: &str) -> Result<ConsoleBinding> {
+fn console_binding(id: &str, start: bool) -> Result<ConsoleBinding> {
     let mut child = Command::new("docker")
-        .args(["attach", "--sig-proxy=false", id])
+        .args(if start {
+            vec!["start", "--attach", "--interactive", id]
+        } else {
+            vec!["attach", "--sig-proxy=false", id]
+        })
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

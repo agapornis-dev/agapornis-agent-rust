@@ -5,7 +5,7 @@ impl DockerManager {
         self.ensure_disk(id).await?;
         self.protection.manual_recovery(id);
         let _ = process::docker(["update", "--restart", "on-failure:2", id]).await?;
-        process::docker(["start", id]).await.map(|_| ())
+        self.start_with_console(id).await
     }
 
     pub async fn stop(&self, id: &str) -> Result<()> {
@@ -20,9 +20,8 @@ impl DockerManager {
         self.ensure_disk(id).await?;
         self.protection.manual_recovery(id);
         let _ = process::docker(["update", "--restart", "on-failure:2", id]).await?;
-        process::docker(["restart", "--time", "10", id])
-            .await
-            .map(|_| ())
+        process::docker(["restart", "--time", "10", id]).await?;
+        self.attach_running_console(id).await
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {

@@ -60,6 +60,7 @@ pub struct CreateSpec {
     pub host_port: i32,
     pub network_owner_id: String,
     pub expose_public_port: bool,
+    pub port_mappings: Vec<(String, i32)>,
 }
 
 pub struct DatabaseConnectionSpec<'a> {

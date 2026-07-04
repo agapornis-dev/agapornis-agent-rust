@@ -53,8 +53,9 @@ message CreateServerRequest {
   string startup_command = 7; int64 disk_limit_bytes = 8; double cpu_cores = 9;
   string install_image = 10; string install_entrypoint = 11; string install_script = 12;
   string config_files_json = 13; int32 host_port = 14; string network_owner_id = 15;
-  bool expose_public_port = 16;
+  bool expose_public_port = 16; repeated PortMapping port_mappings = 17;
 }
+message PortMapping { string variable = 1; string internal_port = 2; int32 host_port = 3; }
 message CreateServerResponse { bool success = 1; int32 assigned_host_port = 2; string error_message = 3; }
 message ServerActionRequest { string server_id = 1; }
 message ServerActionResponse { bool success = 1; string error_message = 2; }
