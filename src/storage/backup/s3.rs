@@ -133,18 +133,17 @@ impl S3Store {
         encrypted: bool,
         path: &Path,
     ) -> Result<()> {
-        let data = self
+        let response = self
             .client()?
             .get_object()
             .bucket(&self.bucket)
             .key(self.archive(id, bid, encrypted))
             .send()
-            .await?
-            .body
-            .collect()
-            .await?
-            .into_bytes();
-        fs::write(path, data).await?;
+            .await?;
+        let mut input = response.body.into_async_read();
+        let mut output = fs::File::create(path).await?;
+        tokio::io::copy(&mut input, &mut output).await?;
+        output.flush().await?;
         Ok(())
     }
     pub(super) async fn delete(&self, id: &str, bid: &str, encrypted: bool) -> Result<()> {

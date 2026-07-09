@@ -1,4 +1,6 @@
 use super::*;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 #[derive(Clone)]
 pub struct ServerService(pub AppState);
@@ -8,27 +10,7 @@ impl proto::server_management_server::ServerManagement for ServerService {
         &self,
         request: Request<CreateServerRequest>,
     ) -> Result<Response<CreateServerResponse>, Status> {
-        let r = request.into_inner();
-        let spec = CreateSpec {
-            server_id: r.server_id.clone(),
-            image: r.docker_image,
-            internal_port: r.internal_port,
-            env: r.env_vars,
-            memory_bytes: r.memory_bytes,
-            cpu_limit_percentage: r.cpu_limit_percentage,
-            cpu_cores: r.cpu_cores,
-            disk_limit_bytes: r.disk_limit_bytes,
-            startup_command: r.startup_command,
-            install_image: r.install_image,
-            install_entrypoint: r.install_entrypoint,
-            install_script: r.install_script,
-            config_files_json: r.config_files_json,
-            host_port: r.host_port,
-            network_owner_id: r.network_owner_id,
-            expose_public_port: r.expose_public_port,
-            port_mappings: r.port_mappings.into_iter()
-                .map(|port| (port.internal_port, port.host_port)).collect(),
-        };
+        let (server_id, spec) = create_spec(request.into_inner());
         Ok(Response::new(match self.0.docker.create(spec).await {
             Ok(port) => CreateServerResponse {
                 success: true,
@@ -36,7 +18,11 @@ impl proto::server_management_server::ServerManagement for ServerService {
                 error_message: String::new(),
             },
             Err(e) => {
-                error!(server=%r.server_id,error=%e,"create failed");
+                error!(
+                    server = %server_id,
+                    error = %format!("{e:#}"),
+                    "create failed"
+                );
                 CreateServerResponse {
                     success: false,
                     assigned_host_port: 0,
@@ -44,6 +30,64 @@ impl proto::server_management_server::ServerManagement for ServerService {
                 }
             }
         }))
+    }
+
+    type CreateServerStreamStream = ResponseStream<CreateServerProgress>;
+
+    async fn create_server_stream(
+        &self,
+        request: Request<CreateServerRequest>,
+    ) -> Result<Response<Self::CreateServerStreamStream>, Status> {
+        let (server_id, spec) = create_spec(request.into_inner());
+        let docker = self.0.docker.clone();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let progress_sender = sender.clone();
+
+        tokio::spawn(async move {
+            let result = docker
+                .create_with_progress(spec, move |phase, progress, message| {
+                    let _ = progress_sender.send(Ok(CreateServerProgress {
+                        phase: phase.into(),
+                        progress,
+                        message: message.into(),
+                        ..Default::default()
+                    }));
+                })
+                .await;
+
+            let final_message = match result {
+                Ok(port) => CreateServerProgress {
+                    phase: "complete".into(),
+                    progress: 100,
+                    message: "Server container is ready".into(),
+                    complete: true,
+                    success: true,
+                    assigned_host_port: port,
+                    ..Default::default()
+                },
+                Err(error) => {
+                    error!(
+                        server = %server_id,
+                        error = %format!("{error:#}"),
+                        "streamed create failed"
+                    );
+                    CreateServerProgress {
+                        phase: "failed".into(),
+                        progress: 100,
+                        message: "Server provisioning failed".into(),
+                        complete: true,
+                        success: false,
+                        error_message: error.to_string(),
+                        ..Default::default()
+                    }
+                }
+            };
+            let _ = sender.send(Ok(final_message));
+        });
+
+        Ok(Response::new(Box::pin(UnboundedReceiverStream::new(
+            receiver,
+        ))))
     }
     async fn start_server(
         &self,
@@ -73,9 +117,12 @@ impl proto::server_management_server::ServerManagement for ServerService {
         &self,
         r: Request<ServerActionRequest>,
     ) -> Result<Response<ServerActionResponse>, Status> {
-        Ok(Response::new(action(
-            self.0.docker.delete(&r.into_inner().server_id).await,
-        )))
+        let id = r.into_inner().server_id;
+        let result = self.0.docker.delete(&id).await;
+        if result.is_ok() {
+            self.0.console.remove(&id).await;
+        }
+        Ok(Response::new(action(result)))
     }
     async fn update_server_resources(
         &self,
@@ -129,17 +176,8 @@ impl proto::server_management_server::ServerManagement for ServerService {
         r: Request<ServerActionRequest>,
     ) -> Result<Response<ServerMetricsResponse>, Status> {
         let id = r.into_inner().server_id;
-        let m = self.0.docker.metrics(&id).await.unwrap_or_default();
-        Ok(Response::new(ServerMetricsResponse {
-            memory_usage_bytes: m.memory_usage,
-            memory_limit_bytes: m.memory_limit,
-            cpu_percentage: m.cpu_percent,
-            network_read_bytes: m.network_read,
-            network_write_bytes: m.network_write,
-            disk_usage_bytes: m.disk_usage,
-            disk_limit_bytes: m.disk_limit,
-            status: m.status,
-        }))
+        let m = self.0.docker.metrics(&id).await.map_err(internal)?;
+        Ok(Response::new(server_metrics_response(m)))
     }
     async fn send_command(
         &self,
@@ -301,5 +339,75 @@ impl proto::server_management_server::ServerManagement for ServerService {
                 error_message: e.to_string(),
             },
         }))
+    }
+}
+
+fn create_spec(r: CreateServerRequest) -> (String, CreateSpec) {
+    let server_id = r.server_id.clone();
+    let spec = CreateSpec {
+        server_id: server_id.clone(),
+        image: r.docker_image,
+        internal_port: r.internal_port,
+        env: r.env_vars,
+        memory_bytes: r.memory_bytes,
+        cpu_limit_percentage: r.cpu_limit_percentage,
+        cpu_cores: r.cpu_cores,
+        disk_limit_bytes: r.disk_limit_bytes,
+        startup_command: r.startup_command,
+        stop_command: r.stop_command,
+        startup_done: r.startup_done,
+        install_image: r.install_image,
+        install_entrypoint: r.install_entrypoint,
+        install_script: r.install_script,
+        config_files_json: r.config_files_json,
+        host_port: r.host_port,
+        network_owner_id: r.network_owner_id,
+        expose_public_port: r.expose_public_port,
+        port_mappings: r
+            .port_mappings
+            .into_iter()
+            .map(|port| (port.internal_port, port.host_port))
+            .collect(),
+    };
+    (server_id, spec)
+}
+
+fn server_metrics_response(metrics: crate::docker::Metrics) -> ServerMetricsResponse {
+    ServerMetricsResponse {
+        memory_usage_bytes: metrics.memory_usage,
+        memory_limit_bytes: metrics.memory_limit,
+        cpu_percentage: metrics.cpu_percent,
+        network_read_bytes: metrics.network_read,
+        network_write_bytes: metrics.network_write,
+        disk_usage_bytes: metrics.disk_usage,
+        disk_limit_bytes: metrics.disk_limit,
+        status: metrics.status,
+        uptime_seconds: metrics.uptime_seconds,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_metrics_are_copied_into_the_grpc_contract() {
+        let response = server_metrics_response(crate::docker::Metrics {
+            memory_usage: 900,
+            memory_limit: 2_000,
+            cpu_percent: 40.0,
+            network_read: 440,
+            network_write: 550,
+            disk_usage: 600,
+            disk_limit: 700,
+            status: "starting".into(),
+            uptime_seconds: 800,
+        });
+
+        assert_eq!(response.cpu_percentage, 40.0);
+        assert_eq!(response.memory_usage_bytes, 900);
+        assert_eq!(response.memory_limit_bytes, 2_000);
+        assert_eq!(response.network_read_bytes, 440);
+        assert_eq!(response.network_write_bytes, 550);
     }
 }

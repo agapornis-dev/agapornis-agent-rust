@@ -2,24 +2,17 @@ use super::*;
 
 use bollard::{
     container::{AttachContainerResults, LogOutput},
-    exec::{
-        CreateExecOptions,
-        StartExecOptions,
-        StartExecResults,
-    },
+    exec::{CreateExecOptions, StartExecOptions, StartExecResults},
     query_parameters::AttachContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
 
 const CONSOLE_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const EXEC_OUTPUT_CAPACITY: usize = 1024 * 1024;
+const EXEC_CAPTURE_LIMIT: usize = 8 * 1024 * 1024;
 
 impl DockerManager {
-    pub async fn send_command(
-        &self,
-        id: &str,
-        command: &str,
-    ) -> Result<()> {
+    pub async fn send_command(&self, id: &str, command: &str) -> Result<()> {
         paths::validate_id(id)?;
 
         let inspect = self.inspect(id).await?;
@@ -65,14 +58,9 @@ impl DockerManager {
             );
         }
 
-        let line = format!(
-            "{}\n",
-            command.trim_end_matches(['\r', '\n'])
-        );
+        let line = format!("{}\n", command.trim_end_matches(['\r', '\n']));
 
-        let binding_arc = self
-            .get_or_create_console_binding(id)
-            .await?;
+        let binding_arc = self.get_or_create_console_binding(id).await?;
 
         /*
          * Only commands for this specific container are serialized. The
@@ -84,46 +72,31 @@ impl DockerManager {
             *binding = self
                 .create_console_binding(id)
                 .await
-                .context(
-                    "reconnect finished container console attachment",
-                )?;
+                .context("reconnect finished container console attachment")?;
         }
 
-        if let Err(first_error) =
-            write_console_line(&mut binding, line.as_bytes()).await
-        {
+        if let Err(first_error) = write_console_line(&mut binding, line.as_bytes()).await {
             tracing::warn!(
                 container_id = %id,
                 "console write failed; reconnecting: {first_error}"
             );
 
-            *binding = self
-                .create_console_binding(id)
-                .await
-                .with_context(|| {
-                    format!(
-                        "reconnect console after write failed: \
+            *binding = self.create_console_binding(id).await.with_context(|| {
+                format!(
+                    "reconnect console after write failed: \
                          {first_error}"
-                    )
-                })?;
+                )
+            })?;
 
-            write_console_line(
-                &mut binding,
-                line.as_bytes(),
-            )
-            .await
-            .context(
-                "write console command after reconnect",
-            )?;
+            write_console_line(&mut binding, line.as_bytes())
+                .await
+                .context("write console command after reconnect")?;
         }
 
         Ok(())
     }
 
-    async fn get_or_create_console_binding(
-        &self,
-        id: &str,
-    ) -> Result<Arc<Mutex<ConsoleBinding>>> {
+    async fn get_or_create_console_binding(&self, id: &str) -> Result<Arc<Mutex<ConsoleBinding>>> {
         /*
          * First check without holding the global lock across an Engine API
          * request.
@@ -135,9 +108,7 @@ impl DockerManager {
             return Ok(binding);
         }
 
-        let candidate = Arc::new(Mutex::new(
-            self.create_console_binding(id).await?,
-        ));
+        let candidate = Arc::new(Mutex::new(self.create_console_binding(id).await?));
 
         /*
          * Another request may have created a binding while this request was
@@ -150,44 +121,29 @@ impl DockerManager {
             return Ok(existing.clone());
         }
 
-        bindings.insert(
-            id.to_owned(),
-            candidate.clone(),
-        );
+        bindings.insert(id.to_owned(), candidate.clone());
 
         Ok(candidate)
     }
 
-    async fn create_console_binding(
-        &self,
-        id: &str,
-    ) -> Result<ConsoleBinding> {
-        let options =
-            AttachContainerOptionsBuilder::default()
-                .logs(false)
-                .stream(true)
-                .stdin(true)
+    async fn create_console_binding(&self, id: &str) -> Result<ConsoleBinding> {
+        let options = AttachContainerOptionsBuilder::default()
+            .logs(false)
+            .stream(true)
+            .stdin(true)
+            /*
+             * This connection is used only for command input. Server logs
+             * should continue through your normal logs implementation.
+             */
+            .stdout(false)
+            .stderr(false)
+            .build();
 
-                /*
-                 * This connection is used only for command input. Server logs
-                 * should continue through your normal logs implementation.
-                 */
-                .stdout(false)
-                .stderr(false)
-                .build();
-
-        let AttachContainerResults {
-            input,
-            mut output,
-        } = self
+        let AttachContainerResults { input, mut output } = self
             .docker
             .attach_container(id, Some(options))
             .await
-            .with_context(|| {
-                format!(
-                    "attach to Docker container console {id}"
-                )
-            })?;
+            .with_context(|| format!("attach to Docker container console {id}"))?;
 
         let container_id = id.to_owned();
 
@@ -228,10 +184,7 @@ impl DockerManager {
         })
     }
 
-    pub(super) async fn start_with_console(
-        &self,
-        id: &str,
-    ) -> Result<()> {
+    pub(super) async fn start_with_console(&self, id: &str) -> Result<()> {
         paths::validate_id(id)?;
 
         self.detach_console(id).await;
@@ -239,77 +192,28 @@ impl DockerManager {
         self.docker
             .start_container(id, None)
             .await
-            .with_context(|| {
-                format!(
-                    "start Docker container {id}"
-                )
-            })?;
+            .with_context(|| format!("start Docker container {id}"))?;
 
         /*
          * start_container() and attach_container() are separate Engine API
          * calls. This attachment only carries stdin, so missing startup output
          * is not relevant here.
          */
-        let binding = self
-            .create_console_binding(id)
-            .await?;
+        let binding = self.create_console_binding(id).await?;
 
         self.disable_console_echo(id).await;
 
-        self.console_bindings.lock().await.insert(
-            id.to_owned(),
-            Arc::new(Mutex::new(binding)),
-        );
-
-        Ok(())
-    }
-
-    pub(super) async fn attach_running_console(
-        &self,
-        id: &str,
-    ) -> Result<()> {
-        paths::validate_id(id)?;
-
-        self.detach_console(id).await;
-
-        let inspect = self.inspect(id).await?;
-
-        if !inspect
-            .pointer("/State/Running")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            bail!("server container is not running");
-        }
-
-        if !inspect
-            .pointer("/Config/OpenStdin")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            bail!(
-                "server container was created without persistent stdin"
-            );
-        }
-
-        let binding = self
-            .create_console_binding(id)
-            .await?;
-
-        self.disable_console_echo(id).await;
-
-        self.console_bindings.lock().await.insert(
-            id.to_owned(),
-            Arc::new(Mutex::new(binding)),
-        );
+        self.console_bindings
+            .lock()
+            .await
+            .insert(id.to_owned(), Arc::new(Mutex::new(binding)));
 
         Ok(())
     }
 
     async fn disable_console_echo(&self, id: &str) {
         const MAX_ATTEMPTS: u32 = 5;
-        const RETRY_DELAY: Duration =
-            Duration::from_millis(150);
+        const RETRY_DELAY: Duration = Duration::from_millis(150);
 
         /*
          * A non-TTY container has no terminal echo to disable.
@@ -318,24 +222,14 @@ impl DockerManager {
             .inspect(id)
             .await
             .ok()
-            .and_then(|inspect| {
-                inspect
-                    .pointer("/Config/Tty")
-                    .and_then(Value::as_bool)
-            })
+            .and_then(|inspect| inspect.pointer("/Config/Tty").and_then(Value::as_bool))
             == Some(false)
         {
             return;
         }
 
         for attempt in 1..=MAX_ATTEMPTS {
-            match self
-                .exec(
-                    id,
-                    "stty -echo < /proc/1/fd/0",
-                )
-                .await
-            {
+            match self.exec(id, "stty -echo < /proc/1/fd/0").await {
                 Ok(_) => return,
 
                 Err(error) if attempt < MAX_ATTEMPTS => {
@@ -361,15 +255,8 @@ impl DockerManager {
         }
     }
 
-    pub(super) async fn detach_console(
-        &self,
-        id: &str,
-    ) {
-        let binding = self
-            .console_bindings
-            .lock()
-            .await
-            .remove(id);
+    pub(super) async fn detach_console(&self, id: &str) {
+        let binding = self.console_bindings.lock().await.remove(id);
 
         if let Some(binding) = binding {
             /*
@@ -385,11 +272,7 @@ impl DockerManager {
         }
     }
 
-    pub async fn exec(
-        &self,
-        id: &str,
-        command: &str,
-    ) -> Result<String> {
+    pub async fn exec(&self, id: &str, command: &str) -> Result<String> {
         paths::validate_id(id)?;
 
         let created = self
@@ -401,20 +284,12 @@ impl DockerManager {
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     tty: Some(false),
-                    cmd: Some(vec![
-                        "/bin/sh",
-                        "-lc",
-                        command,
-                    ]),
+                    cmd: Some(vec!["/bin/sh", "-lc", command]),
                     ..Default::default()
                 },
             )
             .await
-            .with_context(|| {
-                format!(
-                    "create exec command for Docker container {id}"
-                )
-            })?;
+            .with_context(|| format!("create exec command for Docker container {id}"))?;
 
         let started = self
             .docker
@@ -429,20 +304,15 @@ impl DockerManager {
                      * the capacity from its smaller default for commands that
                      * emit long JSON or configuration lines.
                      */
-                    output_capacity: Some(
-                        EXEC_OUTPUT_CAPACITY,
-                    ),
+                    output_capacity: Some(EXEC_OUTPUT_CAPACITY),
                 }),
             )
             .await
-            .with_context(|| {
-                format!(
-                    "start exec command in Docker container {id}"
-                )
-            })?;
+            .with_context(|| format!("start exec command in Docker container {id}"))?;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let mut output_truncated = false;
 
         match started {
             StartExecResults::Attached {
@@ -450,18 +320,23 @@ impl DockerManager {
                 input: _input,
             } => {
                 while let Some(result) = output.next().await {
-                    match result.with_context(|| {
-                        format!(
-                            "read exec output from Docker container {id}"
-                        )
-                    })? {
-                        LogOutput::StdOut { message }
-                        | LogOutput::Console { message } => {
-                            stdout.extend_from_slice(&message);
+                    match result
+                        .with_context(|| format!("read exec output from Docker container {id}"))?
+                    {
+                        LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                            output_truncated |= append_exec_output(
+                                &mut stdout,
+                                &message,
+                                EXEC_CAPTURE_LIMIT.saturating_sub(stderr.len()),
+                            );
                         }
 
                         LogOutput::StdErr { message } => {
-                            stderr.extend_from_slice(&message);
+                            output_truncated |= append_exec_output(
+                                &mut stderr,
+                                &message,
+                                EXEC_CAPTURE_LIMIT.saturating_sub(stdout.len()),
+                            );
                         }
 
                         LogOutput::StdIn { .. } => {}
@@ -470,9 +345,7 @@ impl DockerManager {
             }
 
             StartExecResults::Detached => {
-                bail!(
-                    "Docker exec unexpectedly started in detached mode"
-                );
+                bail!("Docker exec unexpectedly started in detached mode");
             }
         }
 
@@ -480,20 +353,21 @@ impl DockerManager {
             .docker
             .inspect_exec(&created.id)
             .await
-            .with_context(|| {
-                format!(
-                    "inspect exec command in Docker container {id}"
-                )
-            })?;
+            .with_context(|| format!("inspect exec command in Docker container {id}"))?;
 
         let exit_code = inspected.exit_code.unwrap_or(-1);
 
-        if exit_code != 0 {
-            let stderr_text =
-                String::from_utf8_lossy(&stderr);
+        if output_truncated {
+            bail!(
+                "command output exceeded the {} byte capture limit",
+                EXEC_CAPTURE_LIMIT
+            );
+        }
 
-            let stdout_text =
-                String::from_utf8_lossy(&stdout);
+        if exit_code != 0 {
+            let stderr_text = String::from_utf8_lossy(&stderr);
+
+            let stdout_text = String::from_utf8_lossy(&stdout);
 
             let detail = if !stderr_text.trim().is_empty() {
                 stderr_text.trim()
@@ -503,36 +377,29 @@ impl DockerManager {
                 "command returned no output"
             };
 
-            bail!(
-                "command exited with status {exit_code}: {detail}"
-            );
+            bail!("command exited with status {exit_code}: {detail}");
         }
 
-        String::from_utf8(stdout)
-            .context("container command returned non-UTF-8 output")
+        String::from_utf8(stdout).context("container command returned non-UTF-8 output")
     }
 }
 
-async fn write_console_line(
-    binding: &mut ConsoleBinding,
-    line: &[u8],
-) -> Result<()> {
+pub(super) fn append_exec_output(output: &mut Vec<u8>, bytes: &[u8], remaining: usize) -> bool {
+    let length = bytes.len().min(remaining);
+    output.extend_from_slice(&bytes[..length]);
+    length != bytes.len()
+}
+
+async fn write_console_line(binding: &mut ConsoleBinding, line: &[u8]) -> Result<()> {
     if binding.output_task.is_finished() {
         bail!("container console attachment is closed");
     }
 
-    tokio::time::timeout(
-        CONSOLE_WRITE_TIMEOUT,
-        async {
-            binding.stdin.write_all(line).await?;
-            binding.stdin.flush().await
-        },
-    )
+    tokio::time::timeout(CONSOLE_WRITE_TIMEOUT, async {
+        binding.stdin.write_all(line).await?;
+        binding.stdin.flush().await
+    })
     .await
-    .context(
-        "timed out writing to container console",
-    )?
-    .context(
-        "write to container console attachment",
-    )
+    .context("timed out writing to container console")?
+    .context("write to container console attachment")
 }

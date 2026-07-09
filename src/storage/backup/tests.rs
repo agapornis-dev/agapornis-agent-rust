@@ -35,6 +35,11 @@ async fn local_backup_verifies_and_restores_exact_snapshot() {
     fs::write(server.join("stale.txt"), b"must disappear")
         .await
         .unwrap();
+    #[cfg(unix)]
+    let directory_inode = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&server).unwrap().ino()
+    };
     manager
         .restore(
             "server-one",
@@ -49,6 +54,15 @@ async fn local_backup_verifies_and_restores_exact_snapshot() {
         b"original"
     );
     assert!(!server.join("stale.txt").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(&server).unwrap().ino(),
+            directory_inode,
+            "restore must preserve the bind-mounted server directory"
+        );
+    }
     let listed = manager.list("server-one", false).await.unwrap();
     assert!(listed[0].last_verified_at.is_some());
     let _ = fs::remove_dir_all(root).await;

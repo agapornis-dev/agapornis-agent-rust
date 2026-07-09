@@ -1,31 +1,35 @@
 use super::*;
 
-use bollard::{
-    errors::Error as BollardError,
-    models::NetworkCreateRequest,
-};
+use bollard::{errors::Error as BollardError, models::NetworkCreateRequest};
+#[cfg(test)]
+use serde_json::Map;
+
+mod line;
+mod structured;
+mod xml;
+
+#[cfg(test)]
+mod tests;
+
+use line::{apply_file_parser, apply_ini_parser, apply_properties_parser};
+#[cfg(test)]
+use structured::apply_structured_replacements;
+use structured::{apply_json_parser, apply_yaml_parser};
+use xml::apply_xml_parser;
+
+const MAX_CONFIG_FILE_SIZE: u64 = 8 * 1024 * 1024;
 
 impl DockerManager {
-    pub(super) async fn ensure_network(
-        &self,
-        name: &str,
-    ) -> Result<()> {
+    pub(super) async fn ensure_network(&self, name: &str) -> Result<()> {
         match self.docker.inspect_network(name, None).await {
             Ok(_) => Ok(()),
 
             Err(BollardError::DockerResponseServerError {
-                status_code: 404,
-                ..
+                status_code: 404, ..
             }) => {
                 let labels = HashMap::from([
-                    (
-                        "agapornis.managed".to_owned(),
-                        "true".to_owned(),
-                    ),
-                    (
-                        "agapornis.network_type".to_owned(),
-                        "node".to_owned(),
-                    ),
+                    ("agapornis.managed".to_owned(), "true".to_owned()),
+                    ("agapornis.network_type".to_owned(), "node".to_owned()),
                 ]);
 
                 let request = NetworkCreateRequest {
@@ -40,43 +44,29 @@ impl DockerManager {
 
                     // Another create operation may have created the network
                     // between inspect_network() and create_network().
-                    Err(
-                        BollardError::DockerResponseServerError {
-                            status_code: 409,
-                            ..
-                        },
-                    ) => Ok(()),
+                    Err(BollardError::DockerResponseServerError {
+                        status_code: 409, ..
+                    }) => Ok(()),
 
-                    Err(error) => Err(error).with_context(|| {
-                        format!(
-                            "create Docker network {name}"
-                        )
-                    }),
+                    Err(error) => {
+                        Err(error).with_context(|| format!("create Docker network {name}"))
+                    }
                 }
             }
 
-            Err(error) => Err(error).with_context(|| {
-                format!("inspect Docker network {name}")
-            }),
+            Err(error) => Err(error).with_context(|| format!("inspect Docker network {name}")),
         }
     }
 }
 
 pub(super) fn ensure_port(port: u16) -> Result<()> {
     TcpListener::bind(("0.0.0.0", port))
-        .with_context(|| {
-            format!(
-                "Requested host port {port} is already in use."
-            )
-        })?;
+        .with_context(|| format!("Requested host port {port} is already in use."))?;
 
     Ok(())
 }
 
-pub(super) fn effective_cpus(
-    percent: i32,
-    cores: f64,
-) -> f64 {
+pub(super) fn effective_cpus(percent: i32, cores: f64) -> f64 {
     if cores > 0.0 {
         cores
     } else if percent > 0 {
@@ -86,10 +76,7 @@ pub(super) fn effective_cpus(
     }
 }
 
-pub(super) fn validate_startup(
-    root: &Path,
-    command: &str,
-) -> Result<()> {
+pub(super) fn validate_startup(root: &Path, command: &str) -> Result<()> {
     if let Some(target) = startup_target(command)
         && !root.join(&target).exists()
     {
@@ -103,158 +90,141 @@ pub(super) fn validate_startup(
     Ok(())
 }
 
-pub(super) fn startup_target(
-    command: &str,
-) -> Option<PathBuf> {
+pub(super) fn startup_target(command: &str) -> Option<PathBuf> {
     command
         .split_whitespace()
-        .map(|value| {
-            value.trim_matches(|character| {
-                character == '\'' || character == '"'
-            })
-        })
-        .find(|value| {
-            value.ends_with(".jar")
-                || value.starts_with("./")
-        })
-        .map(|value| {
-            PathBuf::from(value.trim_start_matches("./"))
-        })
+        .map(|value| value.trim_matches(|character| character == '\'' || character == '"'))
+        .find(|value| value.ends_with(".jar") || value.starts_with("./"))
+        .map(|value| PathBuf::from(value.trim_start_matches("./")))
 }
 
 pub(super) async fn apply_config_files(
     root: &Path,
     json: &str,
+    docker_interface: &str,
 ) -> Result<()> {
     if json.trim().is_empty() || json.trim() == "{}" {
         return Ok(());
     }
 
-    let map: HashMap<String, Value> =
-        serde_json::from_str(json)?;
-
+    let mut descriptor: Value =
+        serde_json::from_str(json).context("parse configuration-files descriptor")?;
+    resolve_daemon_placeholders(&mut descriptor, docker_interface);
+    let map: HashMap<String, Value> = serde_json::from_value(descriptor)?;
     for (name, config) in map {
-        let target =
-            root.join(paths::relative(&name)?);
-
-        if !target.exists() {
-            continue;
-        }
-
-        let parser = config
-            .get("parser")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-
-        let Some(find) = config
-            .get("find")
-            .and_then(Value::as_object)
-        else {
-            continue;
-        };
-
-        if parser.eq_ignore_ascii_case("file") {
-            let mut text = fs::read_to_string(&target)
-                .await?
-                .replace("\r\n", "\n");
-
-            for (needle, value) in find {
-                let replacement = value
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| value.to_string());
-
-                let mut replaced = false;
-
-                let lines = text
-                    .lines()
-                    .map(|line| {
-                        if line.contains(needle) {
-                            replaced = true;
-                            replacement.clone()
-                        } else {
-                            line.to_owned()
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
-                text = lines.join("\n");
-
-                if !replaced {
-                    if !text.is_empty()
-                        && !text.ends_with('\n')
-                    {
-                        text.push('\n');
-                    }
-
-                    text.push_str(&replacement);
-                }
-            }
-
-            fs::write(&target, text).await?;
-        } else if parser.eq_ignore_ascii_case("json") {
-            let mut document: Value =
-                serde_json::from_slice(
-                    &fs::read(&target).await?,
-                )?;
-
-            for (key, value) in find {
-                set_json_path(
-                    &mut document,
-                    key,
-                    value.clone(),
-                );
-            }
-
-            fs::write(
-                &target,
-                serde_json::to_vec_pretty(&document)?,
-            )
-            .await?;
-        }
+        let target = root.join(paths::relative(&name)?);
+        apply_config_file(&target, &config)
+            .await
+            .with_context(|| format!("apply configuration descriptor to {}", target.display()))?;
     }
 
     Ok(())
 }
 
-pub(super) fn set_json_path(
-    root: &mut Value,
-    path: &str,
-    value: Value,
-) {
-    let parts = path
-        .split('.')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
+pub(super) async fn docker_network_interface(docker: &Docker, network: &str) -> Result<String> {
+    let inspect = docker
+        .inspect_network(network, None)
+        .await
+        .with_context(|| format!("inspect Docker network {network}"))?;
+    let document = serde_json::to_value(inspect)?;
 
-    if parts.is_empty() {
-        return;
-    }
+    find_named_string(&document, "Gateway")
+        .or_else(|| find_named_string(&document, "gateway"))
+        .context("Docker network does not define an IPAM gateway")
+}
 
-    let mut node = root;
-
-    for part in &parts[..parts.len() - 1] {
-        if !node.is_object() {
-            *node = Value::Object(Default::default());
+fn find_named_string(value: &Value, name: &str) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(value) = object.get(name).and_then(Value::as_str)
+                && !value.is_empty()
+            {
+                return Some(value.to_owned());
+            }
+            object
+                .values()
+                .find_map(|value| find_named_string(value, name))
         }
-
-        node = node
-            .as_object_mut()
-            .expect("node was converted to an object")
-            .entry((*part).to_owned())
-            .or_insert_with(|| {
-                Value::Object(Default::default())
-            });
+        Value::Array(array) => array
+            .iter()
+            .find_map(|value| find_named_string(value, name)),
+        _ => None,
     }
+}
 
-    if !node.is_object() {
-        *node = Value::Object(Default::default());
+fn resolve_daemon_placeholders(value: &mut Value, docker_interface: &str) {
+    match value {
+        Value::String(text) => {
+            *text = text
+                .replace("{{config.docker.interface}}", docker_interface)
+                .replace("{{config.docker.network.interface}}", docker_interface);
+        }
+        Value::Array(array) => {
+            for value in array {
+                resolve_daemon_placeholders(value, docker_interface);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                resolve_daemon_placeholders(value, docker_interface);
+            }
+        }
+        _ => {}
     }
+}
 
-    node.as_object_mut()
-        .expect("node was converted to an object")
-        .insert(
-            parts[parts.len() - 1].to_owned(),
-            value,
+async fn apply_config_file(target: &Path, config: &Value) -> Result<()> {
+    let metadata = match fs::metadata(target).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    if metadata.len() > MAX_CONFIG_FILE_SIZE {
+        bail!(
+            "configuration file is {} bytes; maximum is {} bytes",
+            metadata.len(),
+            MAX_CONFIG_FILE_SIZE
         );
+    }
+
+    let parser = config.get("parser").and_then(Value::as_str).unwrap_or("");
+
+    let Some(find) = config.get("find").and_then(Value::as_object) else {
+        return Ok(());
+    };
+
+    let bytes = fs::read(target).await?;
+    let output = match parser.to_ascii_lowercase().as_str() {
+        "file" => apply_file_parser(&bytes, find),
+        "properties" => apply_properties_parser(&bytes, find),
+        "ini" => apply_ini_parser(&bytes, find),
+        "json" => apply_json_parser(&bytes, find)?,
+        "yaml" | "yml" => apply_yaml_parser(&bytes, find)?,
+        "xml" => apply_xml_parser(&bytes, find)?,
+        "" => bail!("configuration parser is required"),
+        other => bail!("unsupported configuration parser '{other}'"),
+    };
+
+    fs::write(target, output).await?;
+    Ok(())
+}
+
+fn replacement_for_current(replacement: &Value, current: &str) -> Option<Value> {
+    match replacement {
+        Value::Object(options) => options.get(current).cloned(),
+        value => Some(value.clone()),
+    }
+}
+
+fn scalar_text(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        value => value.to_string(),
+    }
 }

@@ -13,7 +13,7 @@ use agapornis_agent::{
     update::UpdateManager,
 };
 use anyhow::{Context, Result};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 use tokio::signal;
 use tonic::transport::Server;
 use tracing::info;
@@ -74,6 +74,8 @@ async fn main() -> Result<()> {
             .context("load mTLS certificate bundle")?;
         let server = Server::builder()
             .tls_config(tls)?
+            .http2_keepalive_interval(Some(Duration::from_secs(30)))
+            .http2_keepalive_timeout(Some(Duration::from_secs(10)))
             .add_service(NodeTransferServer::with_interceptor(
                 TransferService(state.clone()),
                 authorize_master,

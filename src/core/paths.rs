@@ -44,6 +44,12 @@ pub fn disk_limit_path(id: &str) -> Result<PathBuf> {
         .join(".metadata")
         .join(format!("{id}.disk-limit")))
 }
+pub fn config_files_path(id: &str) -> Result<PathBuf> {
+    validate_id(id)?;
+    Ok(base_servers_dir()
+        .join(".metadata")
+        .join(format!("{id}.config-files.json")))
+}
 pub fn backup_dir(id: &str) -> Result<PathBuf> {
     Ok(server_dir(id)?.join(".agapornis-backups"))
 }
@@ -115,6 +121,12 @@ mod tests {
     fn rejects_unsafe_server_ids() {
         assert!(server_dir("../../etc").is_err());
         assert!(server_dir("server-123").is_ok());
+        assert!(config_files_path("../../etc").is_err());
+        assert!(
+            config_files_path("server-123")
+                .unwrap()
+                .ends_with("server-123.config-files.json")
+        );
     }
     #[test]
     fn detects_data_images() {

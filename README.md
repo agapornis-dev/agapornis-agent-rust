@@ -1,3 +1,5 @@
+![Logo Image](agapornis-agent.png)
+
 # Agapornis Agent (Rust)
 
 Rust replacement for the Agapornis node agent. It implements the existing `agapornis.v1` gRPC contract and manages Docker servers, files, live consoles, backups, node transfers, telemetry, certificate rotation, and staged agent updates.
@@ -60,6 +62,9 @@ See `.env.example`. Important settings include:
 - `AGAPORNIS_BACKUPS_DIR`
 - `AGAPORNIS_DOCKER_NETWORK`
 - `AGAPORNIS_BACKUP_ENCRYPTION_KEY` (base64-encoded 32-byte key)
+- `AGAPORNIS_BACKUP_CONCURRENCY` (default `1`; keep at `1` for the lowest CPU usage)
+- `AGAPORNIS_PROTECTION_SCAN_SECONDS` (default `10`)
+- `AGAPORNIS_DISK_CHECK_SECONDS` (default `150`)
 - `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_PREFIX`, `S3_FORCE_PATH_STYLE`
 - `AGAPORNIS_CROWDSEC_ENABLED`, `AGAPORNIS_CROWDSEC_CLI_PATH`, `AGAPORNIS_CROWDSEC_MAX_ALERTS`
 - `AGAPORNIS_DOCKER_IMAGE_CLEANUP_ENABLED` (default `true`)

@@ -4,6 +4,13 @@ impl Backups {
     pub async fn new() -> Self {
         Self {
             s3: Arc::new(S3Store::new().await),
+            operations: Arc::new(Semaphore::new(
+                std::env::var("AGAPORNIS_BACKUP_CONCURRENCY")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(1)
+                    .clamp(1, 4),
+            )),
         }
     }
     pub async fn create(
@@ -13,6 +20,7 @@ impl Backups {
         retention: i32,
         encrypt: bool,
     ) -> Result<BackupInfo> {
+        let _permit = self.operation_permit().await?;
         validate_storage(storage)?;
         paths::validate_id(id)?;
         if storage == "s3" && !self.s3.configured() {
@@ -66,7 +74,7 @@ impl Backups {
             self.s3
                 .upload(id, &backup_id, &upload, &info, encrypt)
                 .await?;
-            self.verify(id, &backup_id, "s3").await?;
+            self.verify_inner(id, &backup_id, "s3").await?;
             let _ = fs::remove_file(&upload).await;
             let _ = fs::remove_file(&plain).await;
             if retention > 0 {
@@ -112,6 +120,7 @@ impl Backups {
         storage: &str,
         expected: Option<&str>,
     ) -> Result<()> {
+        let _permit = self.operation_permit().await?;
         let (path, info, temp) = self.prepare(id, bid, storage).await?;
         verify_integrity(&path, &info, expected).await?;
         validate_archive(&path).await?;
@@ -122,6 +131,11 @@ impl Backups {
         Ok(())
     }
     pub async fn verify(&self, id: &str, bid: &str, storage: &str) -> Result<()> {
+        let _permit = self.operation_permit().await?;
+        self.verify_inner(id, bid, storage).await
+    }
+
+    async fn verify_inner(&self, id: &str, bid: &str, storage: &str) -> Result<()> {
         let (path, mut info, temp) = self.prepare(id, bid, storage).await?;
         verify_integrity(&path, &info, None).await?;
         validate_archive(&path).await?;
@@ -146,6 +160,7 @@ impl Backups {
         bid: &str,
         storage: &str,
     ) -> Result<(PathBuf, BackupInfo, bool)> {
+        let _permit = self.operation_permit().await?;
         let (p, i, t) = self.prepare(id, bid, storage).await?;
         verify_integrity(&p, &i, None).await?;
         Ok((p, i, t))
@@ -191,11 +206,13 @@ impl Backups {
         }
     }
     pub async fn temporary_server(&self, id: &str) -> Result<PathBuf> {
+        let _permit = self.operation_permit().await?;
         let target = temp_dir()?.join(format!("{id}-{}.tar.gz", Utc::now().format("%Y%m%d%H%M%S")));
         tar_create(&paths::server_dir(id)?, &target).await?;
         Ok(target)
     }
     pub async fn temporary_backups(&self, id: &str) -> Result<Option<PathBuf>> {
+        let _permit = self.operation_permit().await?;
         let source = backup_dir(id)?;
         if !source.exists() || std::fs::read_dir(&source)?.next().is_none() {
             return Ok(None);
@@ -208,12 +225,14 @@ impl Backups {
         Ok(Some(target))
     }
     pub async fn extract_server(&self, path: &Path, id: &str) -> Result<()> {
+        let _permit = self.operation_permit().await?;
         validate_archive(path).await?;
         let target = paths::server_dir(id)?;
         fs::create_dir_all(&target).await?;
         tar_extract(path, &target).await
     }
     pub async fn extract_backups(&self, path: &Path, id: &str) -> Result<()> {
+        let _permit = self.operation_permit().await?;
         validate_archive(path).await?;
         let target = backup_dir(id)?;
         fs::create_dir_all(&target).await?;
@@ -225,5 +244,13 @@ impl Backups {
             fs::remove_dir_all(path).await?
         }
         Ok(())
+    }
+
+    async fn operation_permit(&self) -> Result<OwnedSemaphorePermit> {
+        self.operations
+            .clone()
+            .acquire_owned()
+            .await
+            .context("backup operation queue is unavailable")
     }
 }

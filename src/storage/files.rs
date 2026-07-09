@@ -1,21 +1,19 @@
 //! Confined server file operations and ownership repair.
 
 use crate::{docker::DockerManager, paths, process};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
-use serde::Deserialize;
-use sha2::{Digest, Sha512};
 use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::{fs, io::AsyncWriteExt};
 
-const MAX_MODPACK_FILE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_MODPACK_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_IN_MEMORY_FILE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DIRECTORY_ENTRIES: usize = 10_000;
+
+#[path = "files/modpack.rs"]
+mod modpack;
 
 #[derive(Debug)]
 pub struct Item {
@@ -24,6 +22,12 @@ pub struct Item {
     pub size: i64,
     pub modified: String,
 }
+
+pub enum ReadSource {
+    Host(PathBuf),
+    Container { id: String, path: String },
+}
+
 #[derive(Clone)]
 pub struct Files {
     docker: Arc<DockerManager>,
@@ -76,6 +80,12 @@ impl Files {
                     size: if meta.is_file() { meta.len() as i64 } else { 0 },
                     modified,
                 });
+                if out.len() > MAX_DIRECTORY_ENTRIES {
+                    bail!(
+                        "Directory contains more than {} entries.",
+                        MAX_DIRECTORY_ENTRIES
+                    )
+                }
             }
             out.sort_by(|a, b| a.name.cmp(&b.name));
             Ok(out)
@@ -86,7 +96,7 @@ impl Files {
                 process::shell_quote(&target)
             );
             let raw = self.docker.exec(id, &command).await?;
-            Ok(raw
+            let items = raw
                 .lines()
                 .filter_map(|line| {
                     let p: Vec<&str> = line.split('\t').collect();
@@ -100,11 +110,55 @@ impl Files {
                         modified: p[3].into(),
                     })
                 })
-                .collect())
+                .collect::<Vec<_>>();
+            if items.len() > MAX_DIRECTORY_ENTRIES {
+                bail!(
+                    "Directory contains more than {} entries.",
+                    MAX_DIRECTORY_ENTRIES
+                )
+            }
+            Ok(items)
         }
     }
 
     pub async fn read(&self, id: &str, path: &str) -> Result<Vec<u8>> {
+        self.read_limited(id, path, MAX_IN_MEMORY_FILE_BYTES).await
+    }
+
+    pub async fn read_limited(&self, id: &str, path: &str, maximum: usize) -> Result<Vec<u8>> {
+        match self.read_source(id, path).await? {
+            ReadSource::Host(path) => {
+                if fs::metadata(&path).await?.len() > maximum as u64 {
+                    bail!("File is too large to read into memory.")
+                }
+                Ok(fs::read(path).await?)
+            }
+            ReadSource::Container { id, path } => {
+                let byte_limit = maximum.saturating_add(1);
+                let raw = self
+                    .docker
+                    .exec(
+                        &id,
+                        &format!(
+                            "head -c {} -- {} | base64",
+                            byte_limit,
+                            process::shell_quote(&path)
+                        ),
+                    )
+                    .await?;
+                let decoded = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    raw.split_whitespace().collect::<String>(),
+                )?;
+                if decoded.len() > maximum {
+                    bail!("File is too large to read into memory.")
+                }
+                Ok(decoded)
+            }
+        }
+    }
+
+    pub async fn read_source(&self, id: &str, path: &str) -> Result<ReadSource> {
         let mut clean_path = path.trim_start_matches(['/', '\\']);
         if clean_path.is_empty() {
             clean_path = ".";
@@ -113,17 +167,15 @@ impl Files {
         let root = self.root(id).await?;
 
         if root.use_host {
-            Ok(fs::read(confined_host_path(&root.host, clean_path, true).await?).await?)
+            Ok(ReadSource::Host(
+                confined_host_path(&root.host, clean_path, true).await?,
+            ))
         } else {
             let target = paths::container_path(&root.container, clean_path)?.replace('\\', "/");
-            let raw = self
-                .docker
-                .exec(id, &format!("base64 < {}", process::shell_quote(&target)))
-                .await?;
-            Ok(base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                raw.split_whitespace().collect::<String>(),
-            )?)
+            Ok(ReadSource::Container {
+                id: id.to_owned(),
+                path: target,
+            })
         }
     }
 
@@ -154,6 +206,55 @@ impl Files {
             );
             process::docker_with_input(["exec", "-i", id, "/bin/sh", "-lc", &command], bytes)
                 .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn write_from_path(&self, id: &str, path: &str, source: &Path) -> Result<()> {
+        let clean_path = path.trim_start_matches(['/', '\\']);
+        if clean_path.is_empty() {
+            bail!("A file path is required.")
+        }
+
+        let root = self.root(id).await?;
+        if root.use_host {
+            fs::create_dir_all(&root.host).await?;
+            let target = confined_host_path(&root.host, clean_path, false).await?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            fs::copy(source, target).await?;
+        } else {
+            let target = paths::container_path(&root.container, clean_path)?.replace('\\', "/");
+            let parent = target
+                .rsplit_once('/')
+                .map(|value| value.0)
+                .unwrap_or(&root.container);
+            let command = format!(
+                "mkdir -p -- {} && cat > {}",
+                process::shell_quote(parent),
+                process::shell_quote(&target)
+            );
+            let mut child = tokio::process::Command::new("docker")
+                .args(["exec", "-i", id, "/bin/sh", "-lc", &command])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .context("start Docker upload stream")?;
+            let mut input = child.stdin.take().context("open Docker upload stream")?;
+            let mut file = fs::File::open(source).await?;
+            tokio::io::copy(&mut file, &mut input).await?;
+            input.shutdown().await?;
+            drop(input);
+            let status = child.wait().await?;
+            if !status.success() {
+                bail!(
+                    "docker upload stream exited with status {}",
+                    status.code().unwrap_or(-1)
+                )
+            }
         }
         Ok(())
     }
@@ -287,202 +388,6 @@ impl Files {
         ])
         .await?;
         Ok(())
-    }
-
-    pub async fn install_mrpack(&self, id: &str, archive_path: &str) -> Result<()> {
-        let root = self.root(id).await?;
-        if !root.use_host {
-            bail!("Stop the server before installing a Modrinth modpack.")
-        }
-        let clean_archive = archive_path.trim_start_matches(['/', '\\']);
-        if !clean_archive.to_ascii_lowercase().ends_with(".mrpack") {
-            bail!("A .mrpack archive is required.")
-        }
-        let archive = confined_host_path(&root.host, clean_archive, true).await?;
-        let manifest_archive = archive.clone();
-        let manifest_text = tokio::task::spawn_blocking(move || -> Result<String> {
-            let file = std::fs::File::open(manifest_archive)?;
-            let mut zip = zip::ZipArchive::new(file)?;
-            let mut entry = zip
-                .by_name("modrinth.index.json")
-                .map_err(|_| anyhow::anyhow!("modrinth.index.json is missing from this pack"))?;
-            if entry.size() > 4 * 1024 * 1024 {
-                bail!("Modrinth pack manifest is too large.")
-            }
-            let mut text = String::new();
-            entry.read_to_string(&mut text)?;
-            Ok(text)
-        })
-        .await??;
-        let manifest: MrpackIndex = serde_json::from_str(&manifest_text)
-            .map_err(|_| anyhow::anyhow!("Modrinth pack manifest is invalid"))?;
-        if manifest.format_version != 1 {
-            bail!("Unsupported Modrinth pack format version.")
-        }
-
-        let client = reqwest::Client::builder()
-            .user_agent("Agapornis-Rust-Agent/1.0")
-            .timeout(std::time::Duration::from_secs(120))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        let mut total_bytes = 0u64;
-        for file in manifest.files {
-            if file
-                .env
-                .as_ref()
-                .and_then(|environment| environment.get("server"))
-                .is_some_and(|value| value == "unsupported")
-            {
-                continue;
-            }
-            let relative = safe_pack_path(&file.path)?;
-            let target = paths::safe_host_path(&root.host, relative.to_string_lossy().as_ref())?;
-            let expected = file
-                .hashes
-                .get("sha512")
-                .ok_or_else(|| anyhow::anyhow!("Pack file {} has no SHA-512 hash", file.path))?
-                .to_ascii_lowercase();
-            let url = file
-                .downloads
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("Pack file {} has no download URL", file.path))?;
-            let parsed = reqwest::Url::parse(url)?;
-            if parsed.scheme() != "https" || parsed.host_str() != Some("cdn.modrinth.com") {
-                bail!("Pack file {} uses an untrusted download host.", file.path)
-            }
-            let response = client.get(parsed).send().await?.error_for_status()?;
-            if response
-                .content_length()
-                .is_some_and(|length| length > MAX_MODPACK_FILE_BYTES)
-            {
-                bail!("Pack file {} exceeds the size limit.", file.path)
-            }
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).await?;
-            }
-            let temporary = target.with_extension(format!(
-                "{}.agapornis-part",
-                target.extension().and_then(|value| value.to_str()).unwrap_or("")
-            ));
-            let mut output = fs::File::create(&temporary).await?;
-            let mut hasher = Sha512::new();
-            let mut file_bytes = 0u64;
-            let mut stream = response.bytes_stream();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk?;
-                file_bytes += chunk.len() as u64;
-                total_bytes += chunk.len() as u64;
-                if file_bytes > MAX_MODPACK_FILE_BYTES || total_bytes > MAX_MODPACK_TOTAL_BYTES {
-                    let _ = fs::remove_file(&temporary).await;
-                    bail!("Modrinth pack exceeds the extraction size limit.")
-                }
-                hasher.update(&chunk);
-                output.write_all(&chunk).await?;
-            }
-            output.flush().await?;
-            drop(output);
-            if hex::encode(hasher.finalize()) != expected {
-                let _ = fs::remove_file(&temporary).await;
-                bail!("SHA-512 verification failed for {}.", file.path)
-            }
-            if fs::try_exists(&target).await? {
-                fs::remove_file(&target).await?;
-            }
-            fs::rename(temporary, target).await?;
-        }
-
-        let overrides_archive = archive.clone();
-        let output_root = root.host.clone();
-        tokio::task::spawn_blocking(move || {
-            extract_mrpack_overrides(&overrides_archive, &output_root)
-        })
-        .await??;
-        Ok(())
-    }
-}
-
-#[derive(Deserialize)]
-struct MrpackIndex {
-    #[serde(rename = "formatVersion")]
-    format_version: u32,
-    files: Vec<MrpackFile>,
-}
-
-#[derive(Deserialize)]
-struct MrpackFile {
-    path: String,
-    hashes: HashMap<String, String>,
-    downloads: Vec<String>,
-    env: Option<HashMap<String, String>>,
-}
-
-fn safe_pack_path(value: &str) -> Result<PathBuf> {
-    let path = Path::new(value);
-    if value.is_empty()
-        || value.contains('\\')
-        || path.is_absolute()
-        || path.components().any(|component| !matches!(component, Component::Normal(_)))
-    {
-        bail!("Modrinth pack contains an unsafe path.")
-    }
-    Ok(path.to_path_buf())
-}
-
-fn extract_mrpack_overrides(archive_path: &Path, root: &Path) -> Result<()> {
-    let file = std::fs::File::open(archive_path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
-    for prefix in ["overrides/", "server-overrides/"] {
-        for index in 0..archive.len() {
-            let mut entry = archive.by_index(index)?;
-            let Some(relative_name) = entry.name().strip_prefix(prefix) else {
-                continue;
-            };
-            if relative_name.is_empty() {
-                continue;
-            }
-            if entry
-                .unix_mode()
-                .is_some_and(|mode| mode & 0o170000 == 0o120000)
-            {
-                bail!("Modrinth pack symbolic links are not allowed.")
-            }
-            let relative = safe_pack_path(relative_name)?;
-            let target = root.join(relative);
-            if entry.is_dir() {
-                std::fs::create_dir_all(target)?;
-                continue;
-            }
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let temporary = target.with_extension(format!(
-                "{}.agapornis-part",
-                target.extension().and_then(|value| value.to_str()).unwrap_or("")
-            ));
-            let mut output = std::fs::File::create(&temporary)?;
-            std::io::copy(&mut entry, &mut output)?;
-            output.flush()?;
-            if target.exists() {
-                std::fs::remove_file(&target)?;
-            }
-            std::fs::rename(temporary, target)?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::safe_pack_path;
-
-    #[test]
-    fn modpack_paths_stay_relative_and_confined() {
-        assert!(safe_pack_path("mods/example.jar").is_ok());
-        assert!(safe_pack_path("config/example.toml").is_ok());
-        assert!(safe_pack_path("../server.jar").is_err());
-        assert!(safe_pack_path("/etc/passwd").is_err());
-        assert!(safe_pack_path("mods\\example.jar").is_err());
-        assert!(safe_pack_path("./mods/example.jar").is_err());
     }
 }
 

@@ -7,11 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(false)
-        .compile_with_config(
-            prost_config,
-            &["proto/server.proto"],
-            &["proto"],
-        )?;
+        .compile_with_config(prost_config, &["proto/server.proto"], &["proto"])?;
 
     println!("cargo:rerun-if-changed=proto/server.proto");
 

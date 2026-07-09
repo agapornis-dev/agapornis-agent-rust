@@ -3,6 +3,7 @@ package agapornis.v1;
 
 service ServerManagement {
   rpc CreateServer (CreateServerRequest) returns (CreateServerResponse);
+  rpc CreateServerStream (CreateServerRequest) returns (stream CreateServerProgress);
   rpc StartServer (ServerActionRequest) returns (ServerActionResponse);
   rpc StopServer (ServerActionRequest) returns (ServerActionResponse);
   rpc RestartServer (ServerActionRequest) returns (ServerActionResponse);
@@ -54,13 +55,23 @@ message CreateServerRequest {
   string install_image = 10; string install_entrypoint = 11; string install_script = 12;
   string config_files_json = 13; int32 host_port = 14; string network_owner_id = 15;
   bool expose_public_port = 16; repeated PortMapping port_mappings = 17;
+  string stop_command = 18; string startup_done = 19;
 }
 message PortMapping { string variable = 1; string internal_port = 2; int32 host_port = 3; }
 message CreateServerResponse { bool success = 1; int32 assigned_host_port = 2; string error_message = 3; }
+message CreateServerProgress {
+  string phase = 1;
+  int32 progress = 2;
+  string message = 3;
+  bool complete = 4;
+  bool success = 5;
+  int32 assigned_host_port = 6;
+  string error_message = 7;
+}
 message ServerActionRequest { string server_id = 1; }
 message ServerActionResponse { bool success = 1; string error_message = 2; }
 message UpdateServerResourcesRequest { string server_id = 1; int64 memory_bytes = 2; int32 cpu_limit_percentage = 3; double cpu_cores = 4; int64 disk_limit_bytes = 5; }
-message ServerMetricsResponse { int64 memory_usage_bytes = 1; int64 memory_limit_bytes = 2; double cpu_percentage = 3; int64 network_read_bytes = 4; int64 network_write_bytes = 5; int64 disk_usage_bytes = 6; int64 disk_limit_bytes = 7; string status = 8; }
+message ServerMetricsResponse { int64 memory_usage_bytes = 1; int64 memory_limit_bytes = 2; double cpu_percentage = 3; int64 network_read_bytes = 4; int64 network_write_bytes = 5; int64 disk_usage_bytes = 6; int64 disk_limit_bytes = 7; string status = 8; int64 uptime_seconds = 9; }
 message NodeStatsRequest {}
 message NodeStatsResponse { double cpu_percentage = 1; int64 memory_usage_bytes = 2; int64 memory_total_bytes = 3; int64 disk_usage_bytes = 4; int64 disk_total_bytes = 5; string status = 6; string error_message = 7; int64 uptime_seconds = 8; int32 cpu_count = 9; }
 message CrowdSecAlertsRequest {}

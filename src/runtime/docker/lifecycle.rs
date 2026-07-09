@@ -5,62 +5,113 @@ use bollard::{
     errors::Error as BollardError,
     models::{ContainerUpdateBody, RestartPolicy},
     query_parameters::{
-        RemoveContainerOptionsBuilder,
-        RestartContainerOptionsBuilder,
-        StopContainerOptionsBuilder,
+        KillContainerOptionsBuilder, RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
     },
 };
+
+mod recreation;
 
 impl DockerManager {
     pub async fn start(&self, id: &str) -> Result<()> {
         paths::validate_id(id)?;
 
+        let needs_bind_repair = self
+            .inspect(id)
+            .await
+            .ok()
+            .and_then(|inspect| {
+                inspect
+                    .pointer("/State/Error")
+                    .and_then(Value::as_str)
+                    .map(stale_docker_desktop_bind_message)
+            })
+            .unwrap_or(false);
+        if needs_bind_repair {
+            tracing::warn!(
+                container_id = %id,
+                "repairing the stale Docker Desktop bind source recorded by the previous start"
+            );
+            self.recreate_with_fresh_bind_mounts(id).await?;
+        }
+
+        self.apply_server_config(id).await?;
         self.ensure_disk(id).await?;
         self.protection.manual_recovery(id);
+        self.startup_ready.lock().await.remove(id);
+        self.startup_checks.lock().await.remove(id);
 
         self.apply_restart_policy(id).await?;
-        self.start_with_console(id).await
+        match self.start_with_console(id).await {
+            Ok(()) => Ok(()),
+            Err(error) if stale_docker_desktop_bind_error(&error) => {
+                tracing::warn!(
+                    container_id = %id,
+                    "Docker Desktop bind source disappeared; recreating the container with fresh mounts"
+                );
+                self.recreate_with_fresh_bind_mounts(id).await?;
+                self.start_with_console(id).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn stop(&self, id: &str) -> Result<()> {
         paths::validate_id(id)?;
 
-        self.detach_console(id).await;
-
-        let options = StopContainerOptionsBuilder::default()
-            .t(10)
-            .build();
-
-        match self.docker.stop_container(id, Some(options)).await {
-            Ok(()) => Ok(()),
-
-            // Docker returns 304 when the container is already stopped.
-            Err(err) if docker_status(&err) == Some(304) => Ok(()),
-
-            Err(err) => Err(err)
-                .with_context(|| format!("stop Docker container {id}")),
+        let inspect = self.inspect(id).await?;
+        if inspect.pointer("/State/Running").and_then(Value::as_bool) != Some(true) {
+            self.detach_console(id).await;
+            return Ok(());
         }
+
+        let stop_command = inspect
+            .pointer("/Config/Labels/agapornis.stop_command")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+
+        if !stop_command.is_empty() {
+            self.disable_restart_policy(id).await?;
+        }
+
+        if stop_command == "^C" {
+            let options = KillContainerOptionsBuilder::default()
+                .signal("SIGINT")
+                .build();
+            if let Err(error) = self.docker.kill_container(id, Some(options)).await {
+                tracing::warn!(
+                    container_id = %id,
+                    "failed to send configured SIGINT: {error}"
+                );
+            }
+        } else if !stop_command.is_empty()
+            && let Err(error) = self.send_command(id, stop_command).await
+        {
+            tracing::warn!(
+                container_id = %id,
+                "failed to send configured stop command: {error}"
+            );
+        }
+
+        if !stop_command.is_empty() && self.wait_until_stopped(id, Duration::from_secs(10)).await? {
+            self.detach_console(id).await;
+            self.startup_ready.lock().await.remove(id);
+            self.startup_checks.lock().await.remove(id);
+            return Ok(());
+        }
+
+        self.force_graceful_stop(id).await?;
+        self.detach_console(id).await;
+        self.startup_ready.lock().await.remove(id);
+        self.startup_checks.lock().await.remove(id);
+        Ok(())
     }
 
     pub async fn restart(&self, id: &str) -> Result<()> {
         paths::validate_id(id)?;
 
-        self.detach_console(id).await;
-        self.ensure_disk(id).await?;
-        self.protection.manual_recovery(id);
-
-        self.apply_restart_policy(id).await?;
-
-        let options = RestartContainerOptionsBuilder::default()
-            .t(10)
-            .build();
-
-        self.docker
-            .restart_container(id, Some(options))
-            .await
-            .with_context(|| format!("restart Docker container {id}"))?;
-
-        self.attach_running_console(id).await
+        self.stop(id).await?;
+        self.start(id).await
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {
@@ -80,8 +131,7 @@ impl DockerManager {
             Err(err) if docker_status(&err) == Some(404) => {}
 
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("remove Docker container {id}"));
+                return Err(err).with_context(|| format!("remove Docker container {id}"));
             }
         }
 
@@ -90,12 +140,7 @@ impl DockerManager {
         if dir.exists() {
             fs::remove_dir_all(&dir)
                 .await
-                .with_context(|| {
-                    format!(
-                        "remove server directory {}",
-                        dir.display()
-                    )
-                })?;
+                .with_context(|| format!("remove server directory {}", dir.display()))?;
         }
 
         let limit = paths::disk_limit_path(id)?;
@@ -103,18 +148,32 @@ impl DockerManager {
         if let Err(err) = fs::remove_file(&limit).await
             && err.kind() != std::io::ErrorKind::NotFound
         {
-            return Err(err).with_context(|| {
-                format!(
-                    "remove disk limit metadata {}",
-                    limit.display()
-                )
-            });
+            return Err(err)
+                .with_context(|| format!("remove disk limit metadata {}", limit.display()));
+        }
+
+        let config = paths::config_files_path(id)?;
+        if let Err(err) = fs::remove_file(&config).await
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(err)
+                .with_context(|| format!("remove configuration metadata {}", config.display()));
         }
 
         self.disk_cache.lock().await.remove(id);
+        self.startup_ready.lock().await.remove(id);
+        self.startup_checks.lock().await.remove(id);
         self.protection.remove(id);
 
         Ok(())
+    }
+
+    pub(crate) async fn forget_runtime_state(&self, id: &str) {
+        self.detach_console(id).await;
+        self.disk_cache.lock().await.remove(id);
+        self.startup_ready.lock().await.remove(id);
+        self.startup_checks.lock().await.remove(id);
+        self.protection.remove(id);
     }
 
     pub async fn update_resources(
@@ -161,11 +220,7 @@ impl DockerManager {
             self.docker
                 .update_container(id, update)
                 .await
-                .with_context(|| {
-                    format!(
-                        "update resources for Docker container {id}"
-                    )
-                })?;
+                .with_context(|| format!("update resources for Docker container {id}"))?;
         }
 
         if disk > 0 {
@@ -179,12 +234,7 @@ impl DockerManager {
 
             fs::write(&path, disk.to_string())
                 .await
-                .with_context(|| {
-                    format!(
-                        "write disk limit metadata {}",
-                        path.display()
-                    )
-                })?;
+                .with_context(|| format!("write disk limit metadata {}", path.display()))?;
         }
 
         self.disk_cache.lock().await.remove(id);
@@ -204,11 +254,77 @@ impl DockerManager {
         self.docker
             .update_container(id, update)
             .await
+            .with_context(|| format!("set restart policy for Docker container {id}"))
+    }
+
+    async fn apply_server_config(&self, id: &str) -> Result<()> {
+        let metadata = paths::config_files_path(id)?;
+        let descriptor = match fs::read_to_string(&metadata).await {
+            Ok(descriptor) => descriptor,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        if descriptor.trim().is_empty() || descriptor.trim() == "{}" {
+            return Ok(());
+        }
+
+        let inspect = self.inspect(id).await?;
+        let network = inspect
+            .pointer("/Config/Labels/agapornis.network")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                std::env::var("AGAPORNIS_DOCKER_NETWORK").unwrap_or_else(|_| "agapornis_ntw".into())
+            });
+        let docker_interface = docker_network_interface(&self.docker, &network).await?;
+        let (root, _, _, _) = self.root(id).await?;
+
+        apply_config_files(&root, &descriptor, &docker_interface).await
+    }
+
+    async fn disable_restart_policy(&self, id: &str) -> Result<()> {
+        let update = ContainerUpdateBody {
+            restart_policy: Some(RestartPolicy {
+                name: Some(RestartPolicyNameEnum::NO),
+                maximum_retry_count: Some(0),
+            }),
+            ..Default::default()
+        };
+
+        self.docker
+            .update_container(id, update)
+            .await
             .with_context(|| {
-                format!(
-                    "set restart policy for Docker container {id}"
-                )
+                format!("disable restart policy before stopping Docker container {id}")
             })
+    }
+
+    async fn force_graceful_stop(&self, id: &str) -> Result<()> {
+        let options = StopContainerOptionsBuilder::default().t(10).build();
+
+        match self.docker.stop_container(id, Some(options)).await {
+            Ok(()) => Ok(()),
+            Err(err) if docker_status(&err) == Some(304) => Ok(()),
+            Err(err) => Err(err).with_context(|| format!("stop Docker container {id}")),
+        }
+    }
+
+    async fn wait_until_stopped(&self, id: &str, timeout: Duration) -> Result<bool> {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            let inspect = self.inspect(id).await?;
+            if inspect.pointer("/State/Running").and_then(Value::as_bool) != Some(true) {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     async fn ensure_disk(&self, id: &str) -> Result<()> {
@@ -230,12 +346,20 @@ impl DockerManager {
     }
 }
 
+pub(super) fn stale_docker_desktop_bind_error(error: &anyhow::Error) -> bool {
+    stale_docker_desktop_bind_message(&format!("{error:#}"))
+}
+
+fn stale_docker_desktop_bind_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("docker-desktop-bind-mounts")
+        && message.contains("no such file or directory")
+        && (message.contains("error mounting") || message.contains("mount src="))
+}
+
 fn docker_status(err: &BollardError) -> Option<u16> {
     match err {
-        BollardError::DockerResponseServerError {
-            status_code,
-            ..
-        } => Some(*status_code),
+        BollardError::DockerResponseServerError { status_code, .. } => Some(*status_code),
 
         _ => None,
     }

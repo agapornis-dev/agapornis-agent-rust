@@ -251,6 +251,13 @@ fn schedule_service_restart() {
     if !automatic_restart_enabled() {
         return;
     }
+    /*
+     * The Linux systemd unit is the long-lived supervisor. The running
+     * process cannot replace itself in memory, so staging writes the new
+     * executable first and asks systemd to restart the unit. At the next
+     * launch main activates the pending binary; systemd then continues to
+     * provide restart policy, logging, and service lifetime management.
+     */
     let service = std::env::var("AGAPORNIS_UPDATE_SYSTEMD_SERVICE")
         .unwrap_or_else(|_| "agapornis-agent.service".into());
     tokio::spawn(async move {

@@ -3,7 +3,7 @@
 use crate::{docker::DockerManager, process, protection::ProtectionState, services::ConsoleHub};
 use serde_json::Value;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -23,7 +23,7 @@ pub fn spawn(
 ) {
     spawn_image_cleanup();
     tokio::spawn(async move {
-        let scan = env_secs("AGAPORNIS_PROTECTION_SCAN_SECONDS", 5);
+        let scan = env_secs("AGAPORNIS_PROTECTION_SCAN_SECONDS", 10);
         let disk_every = Duration::from_secs(env_secs("AGAPORNIS_DISK_CHECK_SECONDS", 150));
         let mut observations: HashMap<String, Observation> = HashMap::new();
         let mut disk_due: HashMap<String, Instant> = HashMap::new();
@@ -102,7 +102,27 @@ async fn scan_once(
         "{{.Names}}",
     ])
     .await?;
-    for id in raw.lines().filter(|v| !v.trim().is_empty()) {
+    let active = raw
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+
+    let stale = observations
+        .keys()
+        .chain(disk_due.keys())
+        .filter(|id| !active.contains(*id))
+        .cloned()
+        .collect::<HashSet<_>>();
+    for id in stale {
+        observations.remove(&id);
+        disk_due.remove(&id);
+        docker.forget_runtime_state(&id).await;
+        console.remove(&id).await;
+    }
+
+    for id in &active {
         let inspect = docker.inspect(id).await?;
         let restart = inspect
             .get("RestartCount")
@@ -127,7 +147,7 @@ async fn scan_once(
             observations,
         )
         .await?;
-        let due = disk_due.entry(id.into()).or_insert_with(Instant::now);
+        let due = disk_due.entry(id.clone()).or_insert_with(Instant::now);
         if *due <= Instant::now() {
             *due = Instant::now() + disk_every;
             let (usage, limit) = docker.disk_force(id).await?;

@@ -25,7 +25,8 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    sync::{OwnedSemaphorePermit, Semaphore},
 };
 use uuid::Uuid;
 
@@ -48,6 +49,7 @@ pub struct BackupInfo {
 #[derive(Clone)]
 pub struct Backups {
     s3: Arc<S3Store>,
+    operations: Arc<Semaphore>,
 }
 
 mod archive;

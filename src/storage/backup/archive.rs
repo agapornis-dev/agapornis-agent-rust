@@ -140,31 +140,111 @@ pub(super) async fn restore_transactionally(archive: &Path, server_id: &str) -> 
         return Err(error);
     }
 
-    let had_target = target.exists();
-    if had_target {
-        fs::rename(&target, &previous)
+    if !target.exists() {
+        return fs::rename(&staging, &target)
             .await
-            .context("move current server data aside before restore")?;
+            .context("activate restored server data");
     }
-    if let Err(error) = fs::rename(&staging, &target).await {
-        if had_target {
-            let _ = fs::rename(&previous, &target).await;
-        }
+
+    /*
+     * Keep the target directory itself in place. Docker Desktop creates an
+     * internal WSL bind source for this directory and stores that source in
+     * the container configuration. Replacing the directory root invalidates
+     * the internal source, leaving the container unable to mount /data after
+     * a restore. Moving the children preserves the bind mount while retaining
+     * replacement (rather than overlay) restore semantics.
+     */
+    fs::create_dir_all(&previous).await?;
+    if let Err(error) = move_directory_contents(&target, &previous).await {
+        let rollback = move_directory_contents(&previous, &target).await;
+        let _ = fs::remove_dir_all(&previous).await;
         let _ = fs::remove_dir_all(&staging).await;
+        if let Err(rollback_error) = rollback {
+            return Err(error).context(format!(
+                "move current server data aside before restore; rollback also failed: {rollback_error:#}"
+            ));
+        }
+        return Err(error).context("move current server data aside before restore");
+    }
+
+    if let Err(error) = move_directory_contents(&staging, &target).await {
+        let clear_result = clear_directory_contents(&target).await;
+        let rollback = move_directory_contents(&previous, &target).await;
+        let _ = fs::remove_dir_all(&staging).await;
+        let _ = fs::remove_dir_all(&previous).await;
+        if let Err(clear_error) = clear_result {
+            return Err(error).context(format!(
+                "activate restored server data; clearing the partial restore failed: {clear_error:#}"
+            ));
+        }
+        if let Err(rollback_error) = rollback {
+            return Err(error).context(format!(
+                "activate restored server data; rollback also failed: {rollback_error:#}"
+            ));
+        }
         return Err(error).context("activate restored server data");
     }
-    if had_target {
-        let _ = fs::remove_dir_all(&previous).await;
+
+    let _ = fs::remove_dir_all(&staging).await;
+    let _ = fs::remove_dir_all(&previous).await;
+    Ok(())
+}
+
+async fn move_directory_contents(source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir_all(target).await?;
+    let mut entries = fs::read_dir(source).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let destination = target.join(entry.file_name());
+        fs::rename(entry.path(), &destination)
+            .await
+            .with_context(|| {
+                format!(
+                    "move restored entry {} to {}",
+                    entry.path().display(),
+                    destination.display()
+                )
+            })?;
+    }
+    Ok(())
+}
+
+async fn clear_directory_contents(directory: &Path) -> Result<()> {
+    let mut entries = fs::read_dir(directory).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if file_type.is_dir() && !file_type.is_symlink() {
+            fs::remove_dir_all(entry.path()).await?;
+        } else {
+            fs::remove_file(entry.path()).await?;
+        }
     }
     Ok(())
 }
 pub(super) async fn validate_archive(path: &Path) -> Result<()> {
-    let out = process::run("tar", ["-tzf", path.to_string_lossy().as_ref()]).await?;
-    for raw in out.lines() {
+    let mut child = tokio::process::Command::new("tar")
+        .args(["-tzf", path.to_string_lossy().as_ref()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("start archive validation")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("open archive validation output")?;
+    let mut lines = BufReader::new(stdout).lines();
+    while let Some(raw) = lines.next_line().await? {
         let entry = raw.trim().replace('\\', "/");
         if entry.starts_with('/') || entry.split('/').any(|v| v == "..") {
             bail!("Backup contains an unsafe archive path.")
         }
+    }
+    let status = child.wait().await?;
+    if !status.success() {
+        bail!(
+            "archive validation exited with status {}",
+            status.code().unwrap_or(-1)
+        )
     }
     Ok(())
 }

@@ -5,7 +5,7 @@ use crate::{
     certificate::CertificateManager,
     config::DaemonConfig,
     docker::{CreateSpec, DatabaseConnectionSpec, DockerManager},
-    file_service::Files,
+    file_service::{Files, ReadSource},
     node,
     protection::{LineDecision, ProtectionState},
     proto::{self, *},
@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::{
     fs,
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
     sync::{Mutex, broadcast},
 };
@@ -47,15 +47,11 @@ impl AppState {
         config: DaemonConfig,
         certificates: CertificateManager,
     ) -> anyhow::Result<Self> {
-        let protection =
-            Arc::new(ProtectionState::default());
+        let protection = Arc::new(ProtectionState::default());
 
-        let docker = Arc::new(
-            DockerManager::new(protection.clone())?,
-        );
+        let docker = Arc::new(DockerManager::new(protection.clone())?);
 
-        let console =
-            Arc::new(ConsoleHub::new(protection.clone()));
+        let console = Arc::new(ConsoleHub::new(protection.clone()));
 
         Ok(Self {
             files: Files::new(docker.clone()),
