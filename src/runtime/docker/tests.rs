@@ -2,6 +2,11 @@ use super::*;
 use bollard::{errors::Error as BollardError, models::ContainerWaitResponse};
 
 #[test]
+fn docker_connection_retry_interval_is_thirty_seconds() {
+    assert_eq!(DOCKER_CONNECT_RETRY_INTERVAL, Duration::from_secs(30));
+}
+
+#[test]
 fn treats_nonzero_installer_wait_as_process_exit() {
     let (code, error) =
         provisioning::installer_exit_status(Err(BollardError::DockerContainerWaitError {

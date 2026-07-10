@@ -49,7 +49,7 @@ impl AppState {
     ) -> anyhow::Result<Self> {
         let protection = Arc::new(ProtectionState::default());
 
-        let docker = Arc::new(DockerManager::new(protection.clone())?);
+        let docker = Arc::new(DockerManager::connect_with_retry(protection.clone()).await);
 
         let console = Arc::new(ConsoleHub::new(protection.clone()));
 

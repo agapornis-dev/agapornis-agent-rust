@@ -1,4 +1,5 @@
 use super::*;
+use crate::paths;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -184,6 +185,9 @@ impl proto::server_management_server::ServerManagement for ServerService {
         r: Request<SendCommandRequest>,
     ) -> Result<Response<ServerActionResponse>, Status> {
         let r = r.into_inner();
+        if let Err(error) = paths::validate_id(&r.server_id) {
+            return Ok(Response::new(failure(&error.to_string())));
+        }
         if r.command.trim().is_empty() {
             return Ok(Response::new(failure("command cannot be empty")));
         }
@@ -239,6 +243,13 @@ impl proto::server_management_server::ServerManagement for ServerService {
         r: Request<ServerActionRequest>,
     ) -> Result<Response<Self::StreamConsoleStream>, Status> {
         let id = r.into_inner().server_id;
+
+        // ConsoleHub retains a sender, history buffer, and reader task per
+        // server. Verify the identifier and container before allocating that
+        // state so malformed or stale requests cannot create retrying tasks.
+        paths::validate_id(&id).map_err(|error| Status::invalid_argument(error.to_string()))?;
+        self.0.docker.inspect(&id).await.map_err(internal)?;
+
         let (history, receiver) = self.0.console.subscribe(&id).await;
         let replay = tokio_stream::iter(
             history

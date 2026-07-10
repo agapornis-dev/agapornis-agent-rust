@@ -20,6 +20,22 @@ pub(super) use installer::{append_tail, installer_exit_status};
 pub(super) use ports::PortReservation;
 
 impl DockerManager {
+    pub async fn connect_with_retry(protection: Arc<ProtectionState>) -> Self {
+        loop {
+            match Self::new(protection.clone()) {
+                Ok(manager) => return manager,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        retry_seconds = DOCKER_CONNECT_RETRY_INTERVAL.as_secs(),
+                        "Docker Engine is unavailable; the agent will retry"
+                    );
+                    tokio::time::sleep(DOCKER_CONNECT_RETRY_INTERVAL).await;
+                }
+            }
+        }
+    }
+
     pub fn new(protection: Arc<ProtectionState>) -> Result<Self> {
         let docker = Docker::connect_with_local_defaults().context("connect to Docker Engine")?;
 

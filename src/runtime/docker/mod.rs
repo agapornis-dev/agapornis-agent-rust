@@ -30,6 +30,7 @@ use tokio::{
 use uuid::Uuid;
 
 const DEFAULT_DISK_LIMIT: i64 = 10 * 1024 * 1024 * 1024;
+const DOCKER_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 enum CacheState {
     Ready(Instant, i64, i64),

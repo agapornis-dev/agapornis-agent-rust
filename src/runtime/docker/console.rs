@@ -70,7 +70,7 @@ impl DockerManager {
 
         if binding.output_task.is_finished() {
             *binding = self
-                .create_console_binding(id)
+                .create_console_binding_with_echo_disabled(id)
                 .await
                 .context("reconnect finished container console attachment")?;
         }
@@ -81,12 +81,15 @@ impl DockerManager {
                 "console write failed; reconnecting: {first_error}"
             );
 
-            *binding = self.create_console_binding(id).await.with_context(|| {
-                format!(
-                    "reconnect console after write failed: \
+            *binding = self
+                .create_console_binding_with_echo_disabled(id)
+                .await
+                .with_context(|| {
+                    format!(
+                        "reconnect console after write failed: \
                          {first_error}"
-                )
-            })?;
+                    )
+                })?;
 
             write_console_line(&mut binding, line.as_bytes())
                 .await
@@ -108,7 +111,9 @@ impl DockerManager {
             return Ok(binding);
         }
 
-        let candidate = Arc::new(Mutex::new(self.create_console_binding(id).await?));
+        let candidate = Arc::new(Mutex::new(
+            self.create_console_binding_with_echo_disabled(id).await?,
+        ));
 
         /*
          * Another request may have created a binding while this request was
@@ -184,6 +189,19 @@ impl DockerManager {
         })
     }
 
+    async fn create_console_binding_with_echo_disabled(&self, id: &str) -> Result<ConsoleBinding> {
+        let binding = self.create_console_binding(id).await?;
+
+        /*
+         * TTY echo can return when the agent's old stdin attachment goes away.
+         * Apply the terminal setting after every attachment, including lazy
+         * attachment after an agent restart and write-failure reconnects.
+         */
+        self.disable_console_echo(id).await;
+
+        Ok(binding)
+    }
+
     pub(super) async fn start_with_console(&self, id: &str) -> Result<()> {
         paths::validate_id(id)?;
 
@@ -199,9 +217,7 @@ impl DockerManager {
          * calls. This attachment only carries stdin, so missing startup output
          * is not relevant here.
          */
-        let binding = self.create_console_binding(id).await?;
-
-        self.disable_console_echo(id).await;
+        let binding = self.create_console_binding_with_echo_disabled(id).await?;
 
         self.console_bindings
             .lock()

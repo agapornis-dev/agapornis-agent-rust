@@ -1,4 +1,5 @@
 use super::*;
+use crate::paths;
 
 struct TemporaryUpload {
     path: std::path::PathBuf,
@@ -39,6 +40,13 @@ impl proto::file_management_server::FileManagement for FileService {
                     if id.is_some() {
                         return Err(Status::invalid_argument("metadata may only be sent once"));
                     }
+                    paths::validate_id(&m.server_id)
+                        .map_err(|error| Status::invalid_argument(error.to_string()))?;
+                    if m.target_path.trim_start_matches(['/', '\\']).is_empty() {
+                        return Err(Status::invalid_argument("upload target path is required"));
+                    }
+                    paths::relative(&m.target_path)
+                        .map_err(|error| Status::invalid_argument(error.to_string()))?;
                     id = Some(m.server_id);
                     path = Some(m.target_path);
                     let (guard, file) = TemporaryUpload::create().await?;

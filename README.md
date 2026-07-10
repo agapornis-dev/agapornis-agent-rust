@@ -52,7 +52,7 @@ The gRPC server listens on `0.0.0.0:5001` using HTTP/2 and mutual TLS. The clien
 - Docker Engine and the `docker` CLI
 - `tar`
 - `df`, `chown`, and `/proc` on Linux
-- `cscli` only when optional CrowdSec telemetry is enabled
+- `cscli` only when optional CrowdSec telemetry is enabled. The default `cscli` value uses PATH lookup and then tries common Linux install paths such as `/usr/bin/cscli`, `/usr/local/bin/cscli`, and `/snap/bin/cscli`.
 
 ## Environment
 
@@ -67,6 +67,8 @@ See `.env.example`. Important settings include:
 - `AGAPORNIS_DISK_CHECK_SECONDS` (default `150`)
 - `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_PREFIX`, `S3_FORCE_PATH_STYLE`
 - `AGAPORNIS_CROWDSEC_ENABLED`, `AGAPORNIS_CROWDSEC_CLI_PATH`, `AGAPORNIS_CROWDSEC_MAX_ALERTS`
+
+CrowdSec telemetry is Linux-only and read-only. Leave `AGAPORNIS_CROWDSEC_CLI_PATH=cscli` unless `cscli` is installed in a custom location; the agent will pass `alerts list -o json --limit <max>` safely as arguments and report successful reads as `active`.
 - `AGAPORNIS_DOCKER_IMAGE_CLEANUP_ENABLED` (default `true`)
 - `AGAPORNIS_DOCKER_IMAGE_CLEANUP_INTERVAL_SECONDS` (default `21600`, every 6 hours)
 - `AGAPORNIS_DOCKER_IMAGE_CLEANUP_MIN_AGE_HOURS` (default `24`)

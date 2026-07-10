@@ -13,6 +13,8 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+const INSTALLER_LOG_FILE_LIMIT: usize = 8 * 1024 * 1024;
+
 impl DockerManager {
     pub(super) async fn run_installer(
         &self,
@@ -106,11 +108,17 @@ impl DockerManager {
         );
         const INSTALLER_LOG_TAIL_BYTES: usize = 64 * 1024;
         let mut log_file = fs::File::create(host.join(".agapornis-install.log")).await?;
+        let mut log_file_bytes = 0usize;
         let mut log_tail = Vec::new();
 
         while let Some(item) = output.next().await {
             let bytes = item.context("read installer output")?.into_bytes();
-            log_file.write_all(&bytes).await?;
+            let remaining = INSTALLER_LOG_FILE_LIMIT.saturating_sub(log_file_bytes);
+            let persisted = bytes.len().min(remaining);
+            if persisted > 0 {
+                log_file.write_all(&bytes[..persisted]).await?;
+                log_file_bytes += persisted;
+            }
             append_tail(&mut log_tail, &bytes, INSTALLER_LOG_TAIL_BYTES);
         }
 
