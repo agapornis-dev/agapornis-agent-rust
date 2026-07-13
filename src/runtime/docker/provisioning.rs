@@ -82,7 +82,8 @@ impl DockerManager {
         let host = paths::server_dir(&spec.server_id)?;
         fs::create_dir_all(&host).await?;
 
-        if spec.disk_limit_bytes > 0 {
+        let effective_disk = effective_disk_limit(spec.disk_limit_bytes, spec.swap_memory_bytes, &spec.swap_memory_storage)?;
+        if effective_disk > 0 {
             let metadata = paths::disk_limit_path(&spec.server_id)?;
 
             fs::create_dir_all(
@@ -92,7 +93,7 @@ impl DockerManager {
             )
             .await?;
 
-            fs::write(metadata, spec.disk_limit_bytes.to_string()).await?;
+            fs::write(metadata, effective_disk.to_string()).await?;
         }
 
         let config_metadata = paths::config_files_path(&spec.server_id)?;
@@ -135,7 +136,16 @@ impl DockerManager {
             // Containers run as uid/gid 999. Linux bind mounts preserve host
             // inode ownership, so the host directory must be writable by that
             // numeric identity before Docker attaches it to the container.
-            let _ = process::run("chown", ["-R", "999:999", host.to_string_lossy().as_ref()]).await;
+            process::run(
+                "chown",
+                [
+                    "-R",
+                    paths::SERVER_RUNTIME_USER,
+                    host.to_string_lossy().as_ref(),
+                ],
+            )
+            .await
+            .context("assign server storage to the runtime user")?;
         }
 
         let data_path = paths::data_path(&spec.image, &spec.env);

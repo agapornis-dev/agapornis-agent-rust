@@ -2,6 +2,8 @@
 
 # Agapornis Agent (Rust)
 
+> **Beta software:** Agapornis is under active development and may introduce breaking changes. Back up node data and test upgrades before using a new release.
+
 Rust replacement for the Agapornis node agent. It implements the existing `agapornis.v1` gRPC contract and manages Docker servers, files, live consoles, backups, node transfers, telemetry, certificate rotation, and staged agent updates.
 
 ## Codebase guide
@@ -37,6 +39,8 @@ cargo build --release
 
 On Linux the binary is `target/release/agapornis-agent`.
 
+Tagged GitHub releases provide prebuilt binaries for `linux-x86_64` and `linux-aarch64`; local compilation is not required on supported hosts.
+
 ## First run
 
 ```bash
@@ -46,6 +50,22 @@ On Linux the binary is `target/release/agapornis-agent`.
 When `config.json` does not exist, the setup wizard asks for the master URL, node ID, and one-time bootstrap token. Remote provisioning is HTTPS-only; loopback HTTP is accepted for local development. Certificates are written under `certs/`, and private material is mode `0600` on Unix.
 
 The gRPC server listens on `0.0.0.0:5001` using HTTP/2 and mutual TLS. The client certificate must chain to the configured CA, use the exact common name `agapornis-master`, and contain the `clientAuth` extended key usage.
+
+## Native systemd installation
+
+Install the binary, run the interactive bootstrap once, and then enable the supplied unit as root:
+
+```bash
+install -m 0755 agapornis-agent-linux-x86_64 /usr/local/bin/agapornis-agent
+mkdir -p /opt/agapornis/agent /etc/agapornis
+cd /opt/agapornis/agent
+/usr/local/bin/agapornis-agent
+install -m 0644 deploy/agapornis-agent.service /etc/systemd/system/agapornis-agent.service
+systemctl daemon-reload
+systemctl enable --now agapornis-agent.service
+```
+
+Use `agapornis-agent-linux-aarch64` on an ARM64 host. Place the generated `config.json` and `certs/` directory in `/opt/agapornis/agent`. Optional environment settings belong in `/etc/agapornis/agent.env`.
 
 ## Runtime dependencies
 
@@ -88,7 +108,9 @@ The backup self-test performs an authenticated encryption round trip and a real 
 
 ## Binary updates
 
-The API stages the SHA-256-verified artifact matching the agent runtime (`linux-x86_64` or `linux-aarch64`). Production activation uses the supplied `deploy/agapornis-agent.service`:
+The repository's release workflow publishes a manifest containing a URL, size, and SHA-256 hash for each supported runtime. The API reads that manifest directly from `agapornis-dev/agapornis-agent-rust`, asks the node which runtime it uses, and sends only the matching artifact to the agent.
+
+The agent downloads over HTTPS, enforces the size limit, verifies SHA-256 before making the file executable, and stages it beside the installed binary. Production activation uses `deploy/agapornis-agent.service`:
 
 - `ExecStartPre --activate-pending-update` atomically swaps the staged binary into place while the service is stopped.
 - The previous executable remains in `updates/previous-agent` during the health window.
@@ -97,3 +119,16 @@ The API stages the SHA-256-verified artifact matching the agent runtime (`linux-
 - `--rollback-update` provides a manual rollback command while the activation is still pending health confirmation.
 
 Set `AGAPORNIS_UPDATE_AUTO_RESTART=true` when running under the supplied systemd unit so a successful staging RPC schedules service activation automatically.
+
+The unit also sets `AGAPORNIS_UPDATE_SYSTEMD_SERVICE=agapornis-agent.service`. `AGAPORNIS_UPDATE_HEALTH_SECONDS` changes the default 30-second health window. To inspect an update, use `journalctl -u agapornis-agent.service`; to force a rollback before the health commit, stop the service and run `/usr/local/bin/agapornis-agent --rollback-update`.
+
+## Publishing a release
+
+Update `Cargo.toml` and `Cargo.lock`, commit the change, and push a matching tag:
+
+```bash
+git tag v0.2.0
+git push origin main v0.2.0
+```
+
+`.github/workflows/release.yml` runs Clippy and tests, cross-compiles both Linux targets, publishes binary checksums, and generates `release-manifest.json`. The version reported by each binary is embedded at build time. The workflow rejects a tag that does not equal `v<Cargo package version>`.

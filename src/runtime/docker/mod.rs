@@ -75,6 +75,10 @@ pub struct CreateSpec {
     pub cpu_limit_percentage: i32,
     pub cpu_cores: f64,
     pub disk_limit_bytes: i64,
+    pub cpu_pinning: bool,
+    pub cpu_pinned_threads: String,
+    pub swap_memory_bytes: i64,
+    pub swap_memory_storage: String,
     pub startup_command: String,
     pub stop_command: String,
     pub startup_done: String,
@@ -97,6 +101,14 @@ pub struct DatabaseConnectionSpec<'a> {
     pub username: &'a str,
     pub password: &'a str,
     pub docker_image: &'a str,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContainerRecreation {
+    pub image: String,
+    pub previous_image_id: String,
+    pub image_id: String,
+    pub image_changed: bool,
 }
 
 #[derive(Default, Debug)]

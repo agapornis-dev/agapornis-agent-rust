@@ -1,0 +1,22 @@
+[Unit]
+Description=Agapornis Rust agent
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/agapornis/agent
+EnvironmentFile=-/etc/agapornis/agent.env
+Environment=AGAPORNIS_UPDATE_AUTO_RESTART=true
+Environment=AGAPORNIS_UPDATE_SYSTEMD_SERVICE=agapornis-agent.service
+ExecStartPre=/usr/local/bin/agapornis-agent --activate-pending-update
+ExecStart=/usr/local/bin/agapornis-agent
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

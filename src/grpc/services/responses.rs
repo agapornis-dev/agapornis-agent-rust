@@ -5,10 +5,12 @@ pub(super) fn action(result: anyhow::Result<()>) -> ServerActionResponse {
         Ok(()) => ServerActionResponse {
             success: true,
             error_message: "".into(),
+            ..Default::default()
         },
         Err(e) => ServerActionResponse {
             success: false,
             error_message: e.to_string(),
+            ..Default::default()
         },
     }
 }
@@ -16,6 +18,7 @@ pub(super) fn failure(message: &str) -> ServerActionResponse {
     ServerActionResponse {
         success: false,
         error_message: message.into(),
+        ..Default::default()
     }
 }
 pub(super) fn file_action(result: anyhow::Result<()>) -> FileActionResponse {

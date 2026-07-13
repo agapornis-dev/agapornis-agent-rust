@@ -1,0 +1,94 @@
+name: Release Rust agent
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate release version
+        shell: bash
+        run: |
+          crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agapornis-agent") | .version')
+          test "${GITHUB_REF_NAME}" = "v${crate_version}"
+      - name: Verify agent
+        run: |
+          cargo clippy --all-targets --locked
+          cargo test --locked
+
+  build:
+    needs: verify
+    strategy:
+      matrix:
+        include:
+          - runtime: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - runtime: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Resolve build version
+        shell: bash
+        run: echo "AGAPORNIS_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build agent
+        shell: bash
+        run: AGAPORNIS_BUILD_VERSION="$AGAPORNIS_VERSION" cargo build --locked --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/agapornis-agent" "dist/agapornis-agent-${{ matrix.runtime }}"
+          sha256sum "dist/agapornis-agent-${{ matrix.runtime }}" > "dist/agapornis-agent-${{ matrix.runtime }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.runtime }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agent-*
+          path: dist
+          merge-multiple: true
+      - name: Create release manifest
+        run: node .github/scripts/create-release-manifest.cjs
+        env:
+          RELEASE_DIRECTORY: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/agapornis-agent-linux-x86_64
+            dist/agapornis-agent-linux-x86_64.sha256
+            dist/agapornis-agent-linux-aarch64
+            dist/agapornis-agent-linux-aarch64.sha256
+            dist/release-manifest.json
+            deploy/agapornis-agent.service

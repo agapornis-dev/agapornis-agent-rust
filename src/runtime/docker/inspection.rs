@@ -153,7 +153,9 @@ impl DockerManager {
          * cgroups v1 generally exposes `total_inactive_file`.
          * cgroups v2 generally exposes `inactive_file`.
          */
-        let resources = resource_metrics(&stat);
+        let mut resources = resource_metrics(&stat);
+        let nano_cpus = inspect.pointer("/HostConfig/NanoCpus").and_then(Value::as_i64).unwrap_or(0);
+        resources.cpu_percent = normalized_cpu_percent(resources.cpu_percent, nano_cpus);
 
         Ok(Metrics {
             memory_usage: resources.memory_usage,
@@ -376,6 +378,15 @@ fn calculate_cpu_percent(stat: &bollard::models::ContainerStatsResponse) -> f64 
     (cpu_delta as f64 / system_delta as f64) * online_cpus as f64 * 100.0
 }
 
+fn normalized_cpu_percent(raw_percent: f64, nano_cpus: i64) -> f64 {
+    let allocated_cpus = nano_cpus as f64 / 1_000_000_000.0;
+    if allocated_cpus > 0.0 {
+        (raw_percent / allocated_cpus).clamp(0.0, 100.0)
+    } else {
+        raw_percent.clamp(0.0, 100.0)
+    }
+}
+
 fn saturating_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
@@ -427,5 +438,12 @@ mod tests {
                 network_write: 550,
             }
         );
+    }
+
+    #[test]
+    fn cpu_usage_is_relative_to_the_allocated_quota() {
+        assert_eq!(normalized_cpu_percent(200.0, 2_000_000_000), 100.0);
+        assert_eq!(normalized_cpu_percent(100.0, 2_000_000_000), 50.0);
+        assert_eq!(normalized_cpu_percent(125.0, 1_000_000_000), 100.0);
     }
 }

@@ -33,6 +33,11 @@ impl proto::file_management_server::FileManagement for FileService {
         let mut temporary = None;
         let mut output = None;
         let mut total = 0usize;
+        let maximum = std::env::var("AGAPORNIS_MAX_FILE_UPLOAD_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(2 * 1024 * 1024 * 1024);
         while let Some(item) = stream.next().await {
             let item = item?;
             match item.data {
@@ -60,7 +65,7 @@ impl proto::file_management_server::FileManagement for FileService {
                         ));
                     }
                     total = total.saturating_add(bytes.len());
-                    if total > 128 * 1024 * 1024 {
+                    if total > maximum {
                         return Err(Status::resource_exhausted("Uploaded file is too large."));
                     }
                     output
@@ -182,7 +187,7 @@ impl proto::file_management_server::FileManagement for FileService {
             .files
             .read_limited(&r.server_id, &r.target_path, 5 * 1024 * 1024)
             .await
-            .map_err(internal)?;
+            .map_err(file_read_status)?;
         let content = String::from_utf8(data)
             .map_err(|_| Status::invalid_argument("File is not valid UTF-8"))?;
         Ok(Response::new(ReadFileResponse { content }))
@@ -212,6 +217,45 @@ impl proto::file_management_server::FileManagement for FileService {
         )))
     }
 
+    async fn create_directory(
+        &self,
+        r: Request<CreateDirectoryRequest>,
+    ) -> Result<Response<FileActionResponse>, Status> {
+        let r = r.into_inner();
+        Ok(Response::new(file_action(
+            self.0
+                .files
+                .create_directory(&r.server_id, &r.target_path)
+                .await,
+        )))
+    }
+
+    async fn move_files(
+        &self,
+        r: Request<MoveFilesRequest>,
+    ) -> Result<Response<FileActionResponse>, Status> {
+        let r = r.into_inner();
+        Ok(Response::new(file_action(
+            self.0
+                .files
+                .move_files(&r.server_id, &r.source_paths, &r.destination_path)
+                .await,
+        )))
+    }
+
+    async fn create_archive(
+        &self,
+        r: Request<CreateArchiveRequest>,
+    ) -> Result<Response<FileActionResponse>, Status> {
+        let r = r.into_inner();
+        Ok(Response::new(file_action(
+            self.0
+                .files
+                .create_archive(&r.server_id, &r.source_paths, &r.destination_path)
+                .await,
+        )))
+    }
+
     async fn extract_archive(
         &self,
         r: Request<ExtractArchiveRequest>,
@@ -236,5 +280,14 @@ impl proto::file_management_server::FileManagement for FileService {
                 .install_mrpack(&r.server_id, &r.target_path)
                 .await,
         )))
+    }
+}
+
+fn file_read_status(error: anyhow::Error) -> Status {
+    let message = error.to_string();
+    if message.contains("File is too large to read into memory") {
+        Status::resource_exhausted(message)
+    } else {
+        internal(error)
     }
 }

@@ -21,6 +21,8 @@ pub(super) fn build_container(
     let labels = server_labels(spec, network, &data_path);
     let ports = server_ports(spec, host_port)?;
     let cpus = effective_cpus(spec.cpu_limit_percentage, spec.cpu_cores);
+    let cpuset_cpus = pinned_cpu_set(&spec.cpu_pinned_threads)?;
+    let memory_swap = (spec.memory_bytes > 0).then_some(spec.memory_bytes.saturating_add(spec.swap_memory_bytes.max(0)));
 
     let healthcheck = database_health_command(&spec.env).map(|command| HealthConfig {
         test: Some(vec!["CMD-SHELL".into(), command]),
@@ -40,7 +42,8 @@ pub(super) fn build_container(
         }),
         security_opt: Some(vec!["no-new-privileges".into()]),
         memory: (spec.memory_bytes > 0).then_some(spec.memory_bytes),
-        memory_swap: (spec.memory_bytes > 0).then_some(spec.memory_bytes),
+        memory_swap,
+        cpuset_cpus,
         nano_cpus: (cpus > 0.0).then_some((cpus * 1_000_000_000.0).round() as i64),
         port_bindings: (!ports.bindings.is_empty()).then_some(ports.bindings),
         ..Default::default()
@@ -57,7 +60,7 @@ pub(super) fn build_container(
 
     Ok(ContainerCreateBody {
         image: Some(spec.image.clone()),
-        user: Some("999:999".into()),
+        user: Some(paths::SERVER_RUNTIME_USER.into()),
         working_dir: Some(data_path),
         // Docker keeps the container's stdin open between agent attachments.
         open_stdin: Some(true),
@@ -105,9 +108,13 @@ fn server_labels(spec: &CreateSpec, network: &str, data_path: &str) -> HashMap<S
         ("agapornis.server_id".into(), spec.server_id.clone()),
         (
             "agapornis.disk_limit_bytes".into(),
-            spec.disk_limit_bytes.to_string(),
+            effective_disk_limit(spec.disk_limit_bytes, spec.swap_memory_bytes, &spec.swap_memory_storage).unwrap_or(spec.disk_limit_bytes).to_string(),
         ),
         ("agapornis.cpu_cores".into(), spec.cpu_cores.to_string()),
+        ("agapornis.cpu_pinning".into(), spec.cpu_pinning.to_string()),
+        ("agapornis.cpu_pinned_threads".into(), spec.cpu_pinned_threads.clone()),
+        ("agapornis.swap_memory_bytes".into(), spec.swap_memory_bytes.to_string()),
+        ("agapornis.swap_memory_storage".into(), spec.swap_memory_storage.clone()),
         (
             "agapornis.cpu_limit_percentage".into(),
             spec.cpu_limit_percentage.to_string(),

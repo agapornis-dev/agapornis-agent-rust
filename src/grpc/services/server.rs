@@ -114,6 +114,28 @@ impl proto::server_management_server::ServerManagement for ServerService {
             self.0.docker.restart(&r.into_inner().server_id).await,
         )))
     }
+    async fn recreate_server(
+        &self,
+        r: Request<ServerActionRequest>,
+    ) -> Result<Response<ServerActionResponse>, Status> {
+        Ok(Response::new(
+            match self.0.docker.recreate(&r.into_inner().server_id).await {
+                Ok(update) => ServerActionResponse {
+                    success: true,
+                    error_message: String::new(),
+                    image: update.image,
+                    previous_image_id: update.previous_image_id,
+                    image_id: update.image_id,
+                    image_changed: update.image_changed,
+                },
+                Err(error) => ServerActionResponse {
+                    success: false,
+                    error_message: error.to_string(),
+                    ..Default::default()
+                },
+            },
+        ))
+    }
     async fn delete_server(
         &self,
         r: Request<ServerActionRequest>,
@@ -139,8 +161,26 @@ impl proto::server_management_server::ServerManagement for ServerService {
                     r.cpu_limit_percentage,
                     r.cpu_cores,
                     r.disk_limit_bytes,
+                    r.cpu_pinning,
+                    &r.cpu_pinned_threads,
+                    r.swap_memory_bytes,
+                    &r.swap_memory_storage,
                 )
                 .await,
+        )))
+    }
+    async fn update_server_ports(
+        &self,
+        r: Request<UpdateServerPortsRequest>,
+    ) -> Result<Response<ServerActionResponse>, Status> {
+        let r = r.into_inner();
+        let mappings = r
+            .port_mappings
+            .into_iter()
+            .map(|mapping| (mapping.internal_port, mapping.host_port))
+            .collect();
+        Ok(Response::new(action(
+            self.0.docker.update_ports(&r.server_id, mappings).await,
         )))
     }
     async fn get_node_stats(
@@ -364,6 +404,10 @@ fn create_spec(r: CreateServerRequest) -> (String, CreateSpec) {
         cpu_limit_percentage: r.cpu_limit_percentage,
         cpu_cores: r.cpu_cores,
         disk_limit_bytes: r.disk_limit_bytes,
+        cpu_pinning: r.cpu_pinning,
+        cpu_pinned_threads: r.cpu_pinned_threads,
+        swap_memory_bytes: r.swap_memory_bytes,
+        swap_memory_storage: r.swap_memory_storage,
         startup_command: r.startup_command,
         stop_command: r.stop_command,
         startup_done: r.startup_done,

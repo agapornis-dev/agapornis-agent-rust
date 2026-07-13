@@ -7,8 +7,10 @@ service ServerManagement {
   rpc StartServer (ServerActionRequest) returns (ServerActionResponse);
   rpc StopServer (ServerActionRequest) returns (ServerActionResponse);
   rpc RestartServer (ServerActionRequest) returns (ServerActionResponse);
+  rpc RecreateServer (ServerActionRequest) returns (ServerActionResponse);
   rpc DeleteServer (ServerActionRequest) returns (ServerActionResponse);
   rpc UpdateServerResources (UpdateServerResourcesRequest) returns (ServerActionResponse);
+  rpc UpdateServerPorts (UpdateServerPortsRequest) returns (ServerActionResponse);
   rpc GetNodeStats (NodeStatsRequest) returns (NodeStatsResponse);
   rpc GetCrowdSecAlerts (CrowdSecAlertsRequest) returns (CrowdSecAlertsResponse);
   rpc GetServerStats (ServerActionRequest) returns (ServerMetricsResponse);
@@ -29,6 +31,9 @@ service FileManagement {
   rpc ReadFileContent (ReadFileRequest) returns (ReadFileResponse);
   rpc WriteFileContent (WriteFileRequest) returns (FileActionResponse);
   rpc RenameFileOrDirectory (RenameFileRequest) returns (FileActionResponse);
+  rpc CreateDirectory (CreateDirectoryRequest) returns (FileActionResponse);
+  rpc MoveFiles (MoveFilesRequest) returns (FileActionResponse);
+  rpc CreateArchive (CreateArchiveRequest) returns (FileActionResponse);
   rpc ExtractArchive (ExtractArchiveRequest) returns (FileActionResponse);
   rpc InstallModpack (InstallModpackRequest) returns (FileActionResponse);
 }
@@ -56,6 +61,7 @@ message CreateServerRequest {
   string config_files_json = 13; int32 host_port = 14; string network_owner_id = 15;
   bool expose_public_port = 16; repeated PortMapping port_mappings = 17;
   string stop_command = 18; string startup_done = 19;
+  bool cpu_pinning = 20; int64 swap_memory_bytes = 21; string swap_memory_storage = 22; string cpu_pinned_threads = 23;
 }
 message PortMapping { string variable = 1; string internal_port = 2; int32 host_port = 3; }
 message CreateServerResponse { bool success = 1; int32 assigned_host_port = 2; string error_message = 3; }
@@ -69,8 +75,16 @@ message CreateServerProgress {
   string error_message = 7;
 }
 message ServerActionRequest { string server_id = 1; }
-message ServerActionResponse { bool success = 1; string error_message = 2; }
-message UpdateServerResourcesRequest { string server_id = 1; int64 memory_bytes = 2; int32 cpu_limit_percentage = 3; double cpu_cores = 4; int64 disk_limit_bytes = 5; }
+message ServerActionResponse {
+  bool success = 1;
+  string error_message = 2;
+  string image = 3;
+  string previous_image_id = 4;
+  string image_id = 5;
+  bool image_changed = 6;
+}
+message UpdateServerResourcesRequest { string server_id = 1; int64 memory_bytes = 2; int32 cpu_limit_percentage = 3; double cpu_cores = 4; int64 disk_limit_bytes = 5; bool cpu_pinning = 6; int64 swap_memory_bytes = 7; string swap_memory_storage = 8; string cpu_pinned_threads = 9; }
+message UpdateServerPortsRequest { string server_id = 1; repeated PortMapping port_mappings = 2; }
 message ServerMetricsResponse { int64 memory_usage_bytes = 1; int64 memory_limit_bytes = 2; double cpu_percentage = 3; int64 network_read_bytes = 4; int64 network_write_bytes = 5; int64 disk_usage_bytes = 6; int64 disk_limit_bytes = 7; string status = 8; int64 uptime_seconds = 9; }
 message NodeStatsRequest {}
 message NodeStatsResponse { double cpu_percentage = 1; int64 memory_usage_bytes = 2; int64 memory_total_bytes = 3; int64 disk_usage_bytes = 4; int64 disk_total_bytes = 5; string status = 6; string error_message = 7; int64 uptime_seconds = 8; int32 cpu_count = 9; }
@@ -99,6 +113,9 @@ message ReadFileRequest { string server_id = 1; string target_path = 2; }
 message ReadFileResponse { string content = 1; }
 message WriteFileRequest { string server_id = 1; string target_path = 2; string content = 3; }
 message RenameFileRequest { string server_id = 1; string target_path = 2; string new_name = 3; }
+message CreateDirectoryRequest { string server_id = 1; string target_path = 2; }
+message MoveFilesRequest { string server_id = 1; repeated string source_paths = 2; string destination_path = 3; }
+message CreateArchiveRequest { string server_id = 1; repeated string source_paths = 2; string destination_path = 3; }
 message ExtractArchiveRequest { string server_id = 1; string target_path = 2; string destination_path = 3; }
 message InstallModpackRequest { string server_id = 1; string target_path = 2; }
 

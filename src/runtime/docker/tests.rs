@@ -68,9 +68,23 @@ async fn temporary_port_reservation_releases_on_drop() {
 }
 
 #[test]
-fn prefers_explicit_cpu_cores() {
-    assert_eq!(configuration::effective_cpus(50, 2.0), 2.0);
+fn cpu_percentage_is_the_only_cpu_limit() {
+    assert_eq!(configuration::effective_cpus(50, 2.0), 0.5);
     assert_eq!(configuration::effective_cpus(50, 0.0), 0.5);
+}
+
+#[test]
+fn server_swap_reduces_usable_server_storage() {
+    assert_eq!(configuration::effective_disk_limit(4096, 1024, "server").unwrap(), 3072);
+    assert_eq!(configuration::effective_disk_limit(4096, 1024, "general").unwrap(), 4096);
+    assert!(configuration::effective_disk_limit(1024, 1024, "server").is_err());
+}
+
+#[test]
+fn validates_explicit_pinned_threads() {
+    assert_eq!(configuration::pinned_cpu_set("0").unwrap(), Some("0".into()));
+    assert!(configuration::pinned_cpu_set("2-1").is_err());
+    assert_eq!(configuration::pinned_cpu_set("").unwrap(), None);
 }
 #[test]
 fn private_database_port_is_exposed_without_host_publish() {

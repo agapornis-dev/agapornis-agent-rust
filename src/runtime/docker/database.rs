@@ -179,9 +179,10 @@ impl DockerManager {
     }
 
     async fn run_database_probe(&self, name: &str, probe: &DatabaseProbe<'_>) -> Result<()> {
-        // The Engine create API does not implicitly pull a missing image as
-        // `docker run` does, so make that step explicit.
-        self.pull_image(probe.docker_image).await?;
+        // A database container already has this exact image locally. Avoid a
+        // network pull on every test; it made a simple SELECT 1 wait for the
+        // registry even when the database was healthy.
+        self.ensure_local_image(probe.docker_image).await?;
 
         let config = ContainerCreateBody {
             image: Some(probe.docker_image.to_owned()),
@@ -297,6 +298,18 @@ impl DockerManager {
 
             Err(error) => {
                 Err(error).with_context(|| format!("remove database probe container {container}"))
+            }
+        }
+    }
+
+    async fn ensure_local_image(&self, image: &str) -> Result<()> {
+        match self.docker.inspect_image(image).await {
+            Ok(_) => Ok(()),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => self.pull_image(image).await,
+            Err(error) => {
+                Err(error).with_context(|| format!("inspect database test image {image}"))
             }
         }
     }

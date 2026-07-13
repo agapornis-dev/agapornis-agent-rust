@@ -5,6 +5,8 @@ use std::path::{Component, Path, PathBuf};
 
 pub const HOME_CONTAINER_PATH: &str = "/home/container";
 pub const DATA_CONTAINER_PATH: &str = "/data";
+/// Numeric identity used by provisioned server containers and their bind mounts.
+pub const SERVER_RUNTIME_USER: &str = "999:999";
 
 pub fn base_servers_dir() -> PathBuf {
     std::env::var_os("AGAPORNIS_SERVERS_DIR")

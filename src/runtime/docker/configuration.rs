@@ -66,13 +66,48 @@ pub(super) fn ensure_port(port: u16) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn effective_cpus(percent: i32, cores: f64) -> f64 {
-    if cores > 0.0 {
-        cores
-    } else if percent > 0 {
+pub(super) fn effective_cpus(percent: i32, _legacy_cores: f64) -> f64 {
+    if percent > 0 {
         percent as f64 / 100.0
     } else {
         0.0
+    }
+}
+
+pub(super) fn pinned_cpu_set(value: &str) -> Result<Option<String>> {
+    let value = value.split_whitespace().collect::<String>();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let available = std::thread::available_parallelism().map(usize::from).unwrap_or(1);
+    let mut selected = HashSet::new();
+    for segment in value.split(',') {
+        let (start, end) = match segment.split_once('-') {
+            Some((start, end)) => (start.parse::<usize>()?, end.parse::<usize>()?),
+            None => {
+                let thread = segment.parse::<usize>()?;
+                (thread, thread)
+            }
+        };
+        if end < start { bail!("invalid pinned CPU thread range '{segment}'"); }
+        if end >= available { bail!("pinned CPU thread {end} does not exist; this node has threads 0-{}", available - 1); }
+        for thread in start..=end {
+            if !selected.insert(thread) { bail!("pinned CPU thread {thread} is listed more than once"); }
+        }
+    }
+    if selected.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(value))
+}
+
+pub(super) fn effective_disk_limit(disk: i64, swap: i64, storage: &str) -> Result<i64> {
+    if swap < 0 { bail!("swap memory cannot be negative"); }
+    if storage == "server" && swap > 0 {
+        if disk <= swap { bail!("server storage must be larger than swap memory"); }
+        Ok(disk - swap)
+    } else {
+        Ok(disk)
     }
 }
 
