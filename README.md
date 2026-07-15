@@ -1,8 +1,11 @@
+
 ![Logo Image](agapornis-agent.png)
 
 # Agapornis Agent (Rust)
 
 > **Beta software:** Agapornis is under active development and may introduce breaking changes. Back up node data and test upgrades before using a new release.
+
+[Discord](https://discord.gg/f5APTGnEnF)
 
 Rust replacement for the Agapornis node agent. It implements the existing `agapornis.v1` gRPC contract and manages Docker servers, files, live consoles, backups, node transfers, telemetry, certificate rotation, and staged agent updates.
 
