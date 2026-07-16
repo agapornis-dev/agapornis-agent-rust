@@ -183,6 +183,25 @@ impl proto::server_management_server::ServerManagement for ServerService {
             self.0.docker.update_ports(&r.server_id, mappings).await,
         )))
     }
+    async fn update_server_configuration(
+        &self,
+        r: Request<UpdateServerConfigurationRequest>,
+    ) -> Result<Response<ServerActionResponse>, Status> {
+        let r = r.into_inner();
+        Ok(Response::new(action(
+            self.0
+                .docker
+                .update_configuration(
+                    &r.server_id,
+                    r.env_vars,
+                    &r.startup_command,
+                    &r.stop_command,
+                    &r.startup_done,
+                    &r.config_files_json,
+                )
+                .await,
+        )))
+    }
     async fn get_node_stats(
         &self,
         _: Request<NodeStatsRequest>,
@@ -343,6 +362,21 @@ impl proto::server_management_server::ServerManagement for ServerService {
                 },
             },
         ))
+    }
+    async fn restart_for_update(
+        &self,
+        _: Request<RestartForUpdateRequest>,
+    ) -> Result<Response<RestartForUpdateResponse>, Status> {
+        Ok(Response::new(match self.0.update.restart_pending() {
+            Ok(result) => RestartForUpdateResponse {
+                success: true,
+                message: result.message,
+            },
+            Err(error) => RestartForUpdateResponse {
+                success: false,
+                message: error.to_string(),
+            },
+        }))
     }
     async fn install_certificate(
         &self,

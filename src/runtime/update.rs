@@ -115,7 +115,7 @@ impl UpdateManager {
             fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).await?;
         }
         fs::write(dir.join("pending-artifact"), target.display().to_string()).await?;
-        schedule_service_restart();
+        schedule_service_restart(false);
         Ok(UpdateResult {
             message: if automatic_restart_enabled() {
                 "Update staged. The agent service restart has been scheduled.".into()
@@ -129,6 +129,19 @@ impl UpdateManager {
 
     pub fn activate_pending(&self) -> Result<ActivationOutcome> {
         activate_at(&std::env::current_exe()?)
+    }
+
+    pub fn restart_pending(&self) -> Result<UpdateResult> {
+        let exe = std::env::current_exe()?;
+        let pending =
+            pending_update_at(&exe)?.context("no verified agent update is staged for restart")?;
+        validate_systemd_service()?;
+        schedule_service_restart(true);
+        Ok(UpdateResult {
+            message: "Agent restart scheduled. The staged update will be activated safely.".into(),
+            staged: pending.display().to_string(),
+            restart_required: true,
+        })
     }
 
     pub fn rollback(&self) -> Result<ActivationOutcome> {
@@ -170,12 +183,8 @@ fn activate_at(exe: &Path) -> Result<ActivationOutcome> {
         }
         return Ok(ActivationOutcome::NothingPending);
     }
-    let pending = PathBuf::from(std::fs::read_to_string(&marker)?.trim());
-    let canonical_dir = std::fs::canonicalize(&dir)?;
-    let canonical_pending = std::fs::canonicalize(&pending)?;
-    if canonical_pending.parent() != Some(canonical_dir.as_path()) {
-        bail!("pending agent update is outside the update staging directory")
-    }
+    let canonical_pending =
+        pending_update_at(exe)?.context("pending agent update marker is empty")?;
     let previous = dir.join("previous-agent");
     let previous_temp = dir.join("previous-agent.tmp");
     std::fs::copy(exe, &previous_temp).context("preserve previous agent binary")?;
@@ -192,6 +201,25 @@ fn activate_at(exe: &Path) -> Result<ActivationOutcome> {
     replace_binary(&canonical_pending, exe).context("activate staged agent binary")?;
     std::fs::remove_file(marker)?;
     Ok(ActivationOutcome::Activated)
+}
+
+fn pending_update_at(exe: &Path) -> Result<Option<PathBuf>> {
+    let dir = staging(exe);
+    let marker = dir.join("pending-artifact");
+    if !marker.exists() {
+        return Ok(None);
+    }
+    let value = std::fs::read_to_string(&marker)?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let canonical_dir = std::fs::canonicalize(&dir)?;
+    let canonical_pending = std::fs::canonicalize(value)?;
+    if canonical_pending.parent() != Some(canonical_dir.as_path()) || !canonical_pending.is_file() {
+        bail!("pending agent update is outside the update staging directory")
+    }
+    Ok(Some(canonical_pending))
 }
 
 fn rollback_at(exe: &Path) -> Result<ActivationOutcome> {
@@ -247,8 +275,8 @@ fn automatic_restart_enabled() -> bool {
         .is_ok_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
 }
 
-fn schedule_service_restart() {
-    if !automatic_restart_enabled() {
+fn schedule_service_restart(force: bool) {
+    if !force && !automatic_restart_enabled() {
         return;
     }
     /*
@@ -263,7 +291,7 @@ fn schedule_service_restart() {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
         match tokio::process::Command::new("systemctl")
-            .args(["restart", &service])
+            .args(["--no-block", "restart", &service])
             .spawn()
         {
             Ok(_) => tracing::info!(
@@ -275,6 +303,33 @@ fn schedule_service_restart() {
             }
         }
     });
+}
+
+fn validate_systemd_service() -> Result<()> {
+    #[cfg(not(unix))]
+    bail!("safe update restart is supported only by the systemd service");
+
+    #[cfg(unix)]
+    {
+        let service = std::env::var("AGAPORNIS_UPDATE_SYSTEMD_SERVICE")
+            .unwrap_or_else(|_| "agapornis-agent.service".into());
+        if service.is_empty()
+            || service.len() > 255
+            || !service
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || b"@_.:-".contains(&value))
+        {
+            bail!("configured agent systemd service name is invalid")
+        }
+        let output = std::process::Command::new("systemctl")
+            .args(["show", "--property=LoadState", "--value", &service])
+            .output()
+            .context("systemctl is unavailable for safe update restart")?;
+        if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "loaded" {
+            bail!("agent systemd service is not loaded; restart the staged update manually")
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -300,6 +355,39 @@ mod tests {
         assert_eq!(std::fs::read(&exe).unwrap(), b"new binary");
         assert_eq!(activate_at(&exe).unwrap(), ActivationOutcome::RolledBack);
         assert_eq!(std::fs::read(&exe).unwrap(), b"old binary");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pending_restart_requires_a_confined_staged_artifact() {
+        let root = std::env::temp_dir().join(format!(
+            "agapornis-update-guard-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join("updates")).unwrap();
+        let exe = root.join("agapornis-agent");
+        let outside = root.join("outside.pending");
+        std::fs::write(&exe, b"old binary").unwrap();
+        std::fs::write(&outside, b"new binary").unwrap();
+        std::fs::write(
+            root.join("updates/pending-artifact"),
+            outside.display().to_string(),
+        )
+        .unwrap();
+
+        assert!(pending_update_at(&exe).is_err());
+
+        let staged = root.join("updates/agent.pending");
+        std::fs::write(&staged, b"new binary").unwrap();
+        std::fs::write(
+            root.join("updates/pending-artifact"),
+            staged.display().to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            pending_update_at(&exe).unwrap(),
+            Some(staged.canonicalize().unwrap())
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

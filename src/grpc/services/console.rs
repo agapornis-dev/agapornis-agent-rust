@@ -239,16 +239,22 @@ where
         }
 
         observed = true;
-        let consumed = available
+        let delimiter = available
             .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(available.len(), |index| index + 1);
+            .position(|byte| matches!(*byte, b'\n' | b'\r'));
+        let consumed = delimiter.map_or(available.len(), |index| {
+            if available[index] == b'\r' && available.get(index + 1) == Some(&b'\n') {
+                index + 2
+            } else {
+                index + 1
+            }
+        });
         let content = &available[..consumed];
         let remaining = maximum.saturating_sub(output.len());
         let copied = content.len().min(remaining);
         output.extend_from_slice(&content[..copied]);
         truncated |= copied != content.len();
-        let complete = content.last() == Some(&b'\n');
+        let complete = delimiter.is_some();
         reader.consume(consumed);
         if complete {
             break;
@@ -281,5 +287,23 @@ mod tests {
         assert!(first.starts_with(&"x".repeat(32)));
         assert!(first.ends_with("[truncated]"));
         assert_eq!(second, "next");
+    }
+
+    #[tokio::test]
+    async fn windows_and_carriage_return_console_lines_replay_immediately() {
+        let mut reader = BufReader::new(&b"first\r\nsecond\rthird\n"[..]);
+
+        assert_eq!(
+            next_bounded_line(&mut reader, 32).await.unwrap().unwrap(),
+            "first"
+        );
+        assert_eq!(
+            next_bounded_line(&mut reader, 32).await.unwrap().unwrap(),
+            "second"
+        );
+        assert_eq!(
+            next_bounded_line(&mut reader, 32).await.unwrap().unwrap(),
+            "third"
+        );
     }
 }

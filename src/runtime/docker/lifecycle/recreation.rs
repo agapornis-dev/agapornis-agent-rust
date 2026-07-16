@@ -8,6 +8,94 @@ use bollard::{
 };
 
 impl DockerManager {
+    pub async fn update_configuration(
+        &self,
+        id: &str,
+        env: Vec<String>,
+        startup_command: &str,
+        stop_command: &str,
+        startup_done: &str,
+        config_files_json: &str,
+    ) -> Result<()> {
+        paths::validate_id(id)?;
+        let host = paths::server_dir(id)?;
+        validate_startup(&host, startup_command)?;
+
+        let inspect = self
+            .docker
+            .inspect_container(id, None)
+            .await
+            .with_context(|| format!("inspect Docker container {id}"))?;
+        let mut config = inspect
+            .config
+            .context("Docker container has no reusable configuration")?;
+        let labels = config
+            .labels
+            .as_mut()
+            .context("refusing to update configuration without Agapornis ownership labels")?;
+        if labels.get("agapornis.server_id").map(String::as_str) != Some(id) {
+            bail!(
+                "refusing to update configuration on a container not owned by this Agapornis server"
+            );
+        }
+
+        let desired_command = (!startup_command.trim().is_empty()).then(|| {
+            vec![
+                "/bin/sh".into(),
+                "-lc".into(),
+                format!("exec {startup_command}"),
+            ]
+        });
+        let merged_env = merged_environment(config.env.as_deref(), env);
+        let configuration_changed = normalized_environment(config.env.as_deref())
+            != normalized_environment(Some(&merged_env))
+            || config.cmd != desired_command
+            || labels
+                .get("agapornis.stop_command")
+                .map(String::as_str)
+                .unwrap_or("")
+                != stop_command
+            || labels
+                .get("agapornis.startup_done")
+                .map(String::as_str)
+                .unwrap_or("")
+                != startup_done;
+
+        let metadata = paths::config_files_path(id)?;
+        if let Some(parent) = metadata.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::write(&metadata, config_files_json).await?;
+        if !configuration_changed {
+            return Ok(());
+        }
+
+        let was_running = inspect
+            .state
+            .as_ref()
+            .and_then(|state| state.running)
+            .unwrap_or(false);
+        config.env = (!merged_env.is_empty()).then_some(merged_env);
+        config.cmd = desired_command;
+        labels.insert("agapornis.stop_command".into(), stop_command.into());
+        labels.insert("agapornis.startup_done".into(), startup_done.into());
+        let host_config = inspect
+            .host_config
+            .context("Docker container has no reusable host configuration")?;
+        let networking_config = reusable_networks(inspect.network_settings, id);
+
+        if was_running {
+            self.stop(id).await?;
+        }
+        self.replace_stale_container(id, create_body(config, host_config, networking_config)?)
+            .await?;
+        self.forget_runtime_state(id).await;
+        if was_running {
+            self.start(id).await?;
+        }
+        Ok(())
+    }
+
     pub async fn update_ports(&self, id: &str, mappings: Vec<(String, i32)>) -> Result<()> {
         paths::validate_id(id)?;
         let (exposed_ports, port_bindings) = validated_port_bindings(mappings)?;
@@ -181,6 +269,34 @@ impl DockerManager {
     }
 }
 
+fn normalized_environment(values: Option<&[String]>) -> Vec<&str> {
+    let mut normalized = values
+        .unwrap_or_default()
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    normalized.sort_unstable();
+    normalized
+}
+
+fn merged_environment(current: Option<&[String]>, desired: Vec<String>) -> Vec<String> {
+    let desired_keys = desired
+        .iter()
+        .filter_map(|entry| entry.split_once('=').map(|(key, _)| key.to_owned()))
+        .collect::<HashSet<_>>();
+    current
+        .unwrap_or_default()
+        .iter()
+        .filter(|entry| {
+            entry
+                .split_once('=')
+                .is_none_or(|(key, _)| !desired_keys.contains(key))
+        })
+        .cloned()
+        .chain(desired)
+        .collect()
+}
+
 fn bound_host_ports(bindings: Option<&HashMap<String, Option<Vec<PortBinding>>>>) -> HashSet<u16> {
     bindings
         .into_iter()
@@ -301,7 +417,20 @@ fn create_body(
 
 #[cfg(test)]
 mod tests {
-    use super::validated_port_bindings;
+    use super::{merged_environment, validated_port_bindings};
+
+    #[test]
+    fn runtime_environment_updates_managed_values_and_keeps_image_defaults() {
+        let current = vec!["PATH=/usr/bin".into(), "MAX_PLAYERS=8".into()];
+        let merged = merged_environment(
+            Some(&current),
+            vec!["MAX_PLAYERS=16".into(), "SERVER_PORT=8766".into()],
+        );
+        assert_eq!(
+            merged,
+            ["PATH=/usr/bin", "MAX_PLAYERS=16", "SERVER_PORT=8766"]
+        );
+    }
 
     #[test]
     fn validates_multiple_port_bindings() {

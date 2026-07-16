@@ -120,6 +120,8 @@ The agent downloads over HTTPS, enforces the size limit, verifies SHA-256 before
 
 Set `AGAPORNIS_UPDATE_AUTO_RESTART=true` when running under the supplied systemd unit so a successful staging RPC schedules service activation automatically.
 
+If a verified artifact remains staged, the admin update screen can request `RestartForUpdate`. The agent accepts that request only while the pending marker resolves to a regular file inside its own update staging directory and the configured systemd unit is loaded. This is intentionally not a general-purpose agent restart operation.
+
 The unit also sets `AGAPORNIS_UPDATE_SYSTEMD_SERVICE=agapornis-agent.service`. `AGAPORNIS_UPDATE_HEALTH_SECONDS` changes the default 30-second health window. To inspect an update, use `journalctl -u agapornis-agent.service`; to force a rollback before the health commit, stop the service and run `/usr/local/bin/agapornis-agent --rollback-update`.
 
 ## Publishing a release
