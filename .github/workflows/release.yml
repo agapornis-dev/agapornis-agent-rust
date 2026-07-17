@@ -59,7 +59,8 @@ jobs:
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/agapornis-agent" "dist/agapornis-agent-${{ matrix.runtime }}"
-          sha256sum "dist/agapornis-agent-${{ matrix.runtime }}" > "dist/agapornis-agent-${{ matrix.runtime }}.sha256"
+          cd dist
+          sha256sum "agapornis-agent-${{ matrix.runtime }}" > "agapornis-agent-${{ matrix.runtime }}.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: agent-${{ matrix.runtime }}
