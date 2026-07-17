@@ -1,6 +1,6 @@
 [package]
 name = "agapornis-agent"
-version = "0.1.9"
+version = "0.2.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "Agapornis node agent implemented in Rust"
