@@ -18,6 +18,8 @@ use structured::{apply_json_parser, apply_yaml_parser};
 use xml::apply_xml_parser;
 
 const MAX_CONFIG_FILE_SIZE: u64 = 8 * 1024 * 1024;
+const STARTUP_TARGET_CHECK_ATTEMPTS: usize = 10;
+const STARTUP_TARGET_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 
 impl DockerManager {
     pub(super) async fn ensure_network(&self, name: &str) -> Result<()> {
@@ -111,18 +113,48 @@ pub(super) fn effective_disk_limit(disk: i64, swap: i64, storage: &str) -> Resul
     }
 }
 
-pub(super) fn validate_startup(root: &Path, command: &str) -> Result<()> {
-    if let Some(target) = startup_target(command)
-        && !root.join(&target).exists()
-    {
-        bail!(
-            "Startup target '{}' was not found after the install \
-             script completed.",
-            target.display()
-        );
+pub(super) async fn validate_startup(root: &Path, command: &str) -> Result<()> {
+    let Some(target) = startup_target(command) else {
+        return Ok(());
+    };
+    let resolved = root.join(&target);
+
+    for attempt in 1..=STARTUP_TARGET_CHECK_ATTEMPTS {
+        match fs::metadata(&resolved).await {
+            Ok(metadata) if metadata.is_file() => return Ok(()),
+            Ok(_) => {
+                bail!(
+                    "Startup target '{}' exists at '{}', but is not a regular file.",
+                    target.display(),
+                    resolved.display()
+                );
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && attempt < STARTUP_TARGET_CHECK_ATTEMPTS =>
+            {
+                tokio::time::sleep(STARTUP_TARGET_CHECK_INTERVAL).await;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                bail!(
+                    "Startup target '{}' was not found at '{}' after the install script completed.",
+                    target.display(),
+                    resolved.display()
+                );
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspect startup target '{}' at '{}'",
+                        target.display(),
+                        resolved.display()
+                    )
+                });
+            }
+        }
     }
 
-    Ok(())
+    unreachable!("startup target check loop always returns")
 }
 
 pub(super) fn startup_target(command: &str) -> Option<PathBuf> {

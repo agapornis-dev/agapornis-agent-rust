@@ -19,7 +19,7 @@ impl DockerManager {
     ) -> Result<()> {
         paths::validate_id(id)?;
         let host = paths::server_dir(id)?;
-        validate_startup(&host, startup_command)?;
+        validate_startup(&host, startup_command).await?;
 
         let inspect = self
             .docker

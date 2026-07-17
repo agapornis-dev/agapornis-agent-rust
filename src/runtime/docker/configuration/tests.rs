@@ -5,6 +5,27 @@ fn replacements(value: Value) -> Map<String, Value> {
     value.as_object().unwrap().clone()
 }
 
+#[tokio::test]
+async fn startup_validation_waits_for_a_delayed_installer_target() {
+    let root = std::env::temp_dir().join(format!("agapornis-startup-test-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).await.unwrap();
+    let executable = root.join("SonsOfTheForestDS.exe");
+    let delayed_executable = executable.clone();
+
+    let writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        fs::write(delayed_executable, b"test executable")
+            .await
+            .unwrap();
+    });
+
+    validate_startup(&root, "wine ./SonsOfTheForestDS.exe")
+        .await
+        .unwrap();
+    writer.await.unwrap();
+    fs::remove_dir_all(root).await.unwrap();
+}
+
 #[test]
 fn file_parser_matches_line_prefix_only() {
     let output = apply_file_parser(

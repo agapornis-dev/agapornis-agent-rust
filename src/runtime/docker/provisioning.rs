@@ -122,7 +122,7 @@ impl DockerManager {
             "Applying generated server configuration",
         );
         apply_config_files(&host, &spec.config_files_json, &docker_interface).await?;
-        validate_startup(&host, &spec.startup_command)?;
+        validate_startup(&host, &spec.startup_command).await?;
 
         report(
             "pulling-runtime-image",
