@@ -310,17 +310,22 @@ impl proto::server_management_server::ServerManagement for ServerService {
         self.0.docker.inspect(&id).await.map_err(internal)?;
 
         let (history, receiver) = self.0.console.subscribe(&id).await;
-        let replay = tokio_stream::iter(
-            history
-                .into_iter()
-                .map(|line| Ok(ConsoleMessage { log_line: line })),
-        );
+        let replay = tokio_stream::iter(history.into_iter().map(|line| {
+            Ok(ConsoleMessage {
+                log_line: line,
+                replayed: Some(true),
+            })
+        }));
         let live = BroadcastStream::new(receiver).filter_map(|v| async move {
             match v {
-                Ok(line) => Some(Ok(ConsoleMessage { log_line: line })),
+                Ok(line) => Some(Ok(ConsoleMessage {
+                    log_line: line,
+                    replayed: Some(false),
+                })),
                 Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
                     Some(Ok(ConsoleMessage {
                         log_line: format!("[agent] console stream dropped {n} lines"),
+                        replayed: Some(false),
                     }))
                 }
             }

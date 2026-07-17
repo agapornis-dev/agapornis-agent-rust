@@ -74,6 +74,10 @@ async fn main() -> Result<()> {
             .context("load mTLS certificate bundle")?;
         let server = Server::builder()
             .tls_config(tls)?
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .tcp_keepalive_interval(Some(Duration::from_secs(10)))
+            .http2_adaptive_window(Some(true))
             .http2_keepalive_interval(Some(Duration::from_secs(30)))
             .http2_keepalive_timeout(Some(Duration::from_secs(10)))
             .add_service(NodeTransferServer::with_interceptor(

@@ -100,7 +100,7 @@ message CrowdSecAlertsResponse { bool enabled = 1; bool supported = 2; string st
 message SendCommandRequest { string server_id = 1; string command = 2; }
 message DatabaseConnectionTestRequest { string server_id = 1; string database_type = 2; string host = 3; int32 port = 4; string database_name = 5; string username = 6; string password = 7; string docker_image = 8; }
 message DatabaseConnectionTestResponse { bool success = 1; string error_message = 2; int64 latency_ms = 3; }
-message ConsoleMessage { string log_line = 1; }
+message ConsoleMessage { string log_line = 1; optional bool replayed = 2; }
 message UpdateStatusRequest {}
 message UpdateStatusResponse { string version = 1; string runtime_identifier = 2; string executable_path = 3; string staging_directory = 4; bool restart_required = 5; string pending_artifact = 6; }
 message ApplyUpdateRequest { string artifact_url = 1; string sha256 = 2; }
