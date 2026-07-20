@@ -11,7 +11,7 @@ use tokio::{sync::Notify, task::JoinHandle};
 
 const CONSOLE_BROADCAST_CAPACITY: usize = 256;
 const CONSOLE_HISTORY_LINES: usize = 200;
-const CONSOLE_HISTORY_BYTES: usize = 512 * 1024;
+const CONSOLE_HISTORY_BYTES: usize = 64 * 1024;
 const CONSOLE_RECONNECT_MIN: Duration = Duration::from_secs(1);
 const CONSOLE_RECONNECT_MAX: Duration = Duration::from_secs(30);
 const TRUNCATION_SUFFIX: &str = " … [truncated]";
@@ -200,6 +200,25 @@ impl ConsoleHub {
 
     pub(super) async fn inventory_initialized(&self) -> bool {
         self.lifecycle.lock().await.inventory_initialized
+    }
+
+    /// Returns whether a console attach still needs a Docker existence check.
+    ///
+    /// Servers already owned by this hub have a persistent reader (or a
+    /// reader that can be restarted by `subscribe`) and therefore do not need
+    /// another Engine round trip just because a browser viewer attached. An
+    /// unknown identifier is only allowed before the authoritative startup
+    /// inventory arrives, and must be validated against Docker before it can
+    /// create local console state.
+    pub(super) async fn attach_requires_inspection(&self, id: &str) -> anyhow::Result<bool> {
+        let lifecycle = self.lifecycle.lock().await;
+        if lifecycle.inventory_initialized && !lifecycle.desired.contains(id) {
+            anyhow::bail!("server is not assigned to this agent console inventory");
+        }
+        if !lifecycle.inventory_initialized && lifecycle.pending_removals.contains(id) {
+            anyhow::bail!("server was removed before console inventory bootstrap");
+        }
+        Ok(!lifecycle.desired.contains(id))
     }
 
     fn record_addition(lifecycle: &mut ConsoleLifecycle, id: &str) {
@@ -874,6 +893,7 @@ mod tests {
         let hub = memory_hub();
         hub.synchronize_servers(Vec::new()).await.unwrap();
 
+        assert!(hub.attach_requires_inspection("server").await.is_err());
         assert!(hub.subscribe("server").await.is_err());
         assert!(!hub.lifecycle.lock().await.desired.contains("server"));
     }
@@ -883,6 +903,7 @@ mod tests {
         let hub = memory_hub();
         hub.remove("server").await;
 
+        assert!(hub.attach_requires_inspection("server").await.is_err());
         assert!(hub.subscribe("server").await.is_err());
         hub.publish("server", "late supervisor message".into())
             .await;
@@ -891,6 +912,78 @@ mod tests {
             .await
             .unwrap();
         assert!(!hub.lifecycle.lock().await.desired.contains("server"));
+    }
+
+    #[tokio::test]
+    async fn tracked_console_attach_does_not_require_docker_inspection() {
+        let hub = memory_hub();
+        hub.track_server("server").await.unwrap();
+
+        assert!(!hub.attach_requires_inspection("server").await.unwrap());
+
+        hub.synchronize_servers(vec!["inventory-server".into()])
+            .await
+            .unwrap();
+        assert!(
+            !hub.attach_requires_inspection("inventory-server")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn warm_attach_eligibility_does_not_bypass_a_later_delete() {
+        let hub = memory_hub();
+        hub.synchronize_servers(vec!["server".into()])
+            .await
+            .unwrap();
+
+        assert!(!hub.attach_requires_inspection("server").await.unwrap());
+        hub.remove("server").await;
+
+        assert!(hub.subscribe("server").await.is_err());
+        assert!(!hub.lifecycle.lock().await.desired.contains("server"));
+    }
+
+    #[tokio::test]
+    async fn recreated_same_id_is_warm_and_can_subscribe() {
+        let hub = memory_hub();
+        hub.synchronize_servers(vec!["server".into()])
+            .await
+            .unwrap();
+        hub.publish("server", "old generation".into()).await;
+        let (old_history, _, mut old_receiver) = hub.subscribe("server").await.unwrap();
+        assert_eq!(old_history, ["old generation"]);
+
+        hub.remove("server").await;
+        hub.track_server("server").await.unwrap();
+
+        assert!(!hub.attach_requires_inspection("server").await.unwrap());
+        let (new_history, _, mut new_receiver) = hub.subscribe("server").await.unwrap();
+        assert!(new_history.is_empty());
+
+        hub.publish("server", "new generation".into()).await;
+        assert_eq!(new_receiver.recv().await.unwrap().line, "new generation");
+        assert!(matches!(
+            old_receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_pre_bootstrap_inspection_check_does_not_allocate_state() {
+        let hub = memory_hub();
+
+        assert!(
+            hub.attach_requires_inspection("not-yet-in-inventory")
+                .await
+                .unwrap()
+        );
+        let lifecycle = hub.lifecycle.lock().await;
+        assert!(lifecycle.desired.is_empty());
+        assert!(lifecycle.readers.is_empty());
+        drop(lifecycle);
+        assert!(hub.history.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -908,6 +1001,25 @@ mod tests {
         );
         assert!(hub.history.lock().await.get("server").is_none());
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn console_history_is_bounded_to_64_kib_per_server() {
+        let hub = memory_hub();
+        hub.synchronize_servers(vec!["server".into()])
+            .await
+            .unwrap();
+
+        for index in 0..5 {
+            hub.publish("server", format!("{index}:{}", "x".repeat(15_998)))
+                .await;
+        }
+
+        let history = hub.history.lock().await;
+        let history = history.get("server").unwrap();
+        assert!(history.bytes <= CONSOLE_HISTORY_BYTES);
+        assert_eq!(history.lines.len(), 4);
+        assert!(history.lines.front().unwrap().line.starts_with("1:"));
     }
 
     #[test]

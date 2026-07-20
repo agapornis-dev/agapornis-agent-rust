@@ -328,11 +328,23 @@ impl proto::server_management_server::ServerManagement for ServerService {
         let id = r.into_inner().server_id;
 
         // ConsoleHub retains a sender, history buffer, and reader task per
-        // server. Verify the identifier and container before allocating that
-        // state so malformed or stale requests cannot create retrying tasks.
+        // assigned server. A viewer attaching to that warm state must not pay
+        // for another Docker Engine request. Only a genuinely unknown server
+        // seen before startup inventory bootstrap needs an existence check;
+        // the hub rejects deleted and post-bootstrap unassigned identifiers.
         paths::validate_id(&id).map_err(|error| Status::invalid_argument(error.to_string()))?;
-        self.0.docker.inspect(&id).await.map_err(internal)?;
+        if self
+            .0
+            .console
+            .attach_requires_inspection(&id)
+            .await
+            .map_err(|error| Status::failed_precondition(error.to_string()))?
+        {
+            self.0.docker.inspect(&id).await.map_err(internal)?;
+        }
 
+        // Re-check lifecycle ownership inside subscribe: the server may have
+        // been deleted while a cold Docker inspection was in flight.
         let (history, replayed_through, receiver) = self
             .0
             .console
