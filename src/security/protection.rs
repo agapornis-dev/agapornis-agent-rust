@@ -6,12 +6,35 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Default)]
 pub struct ProtectionState {
     commands: Mutex<HashMap<String, Rate>>,
     console: Mutex<HashMap<String, ConsoleRate>>,
     statuses: Mutex<HashMap<String, String>>,
     recovery: Mutex<HashMap<String, Instant>>,
+    console_lines_per_second: usize,
+    console_strike_limit: usize,
+    console_max_line_length: usize,
+    console_commands_per_5_seconds: usize,
+}
+
+impl Default for ProtectionState {
+    fn default() -> Self {
+        Self {
+            commands: Mutex::new(HashMap::new()),
+            console: Mutex::new(HashMap::new()),
+            statuses: Mutex::new(HashMap::new()),
+            recovery: Mutex::new(HashMap::new()),
+            // Configuration is process-scoped. Read it once at daemon startup
+            // instead of consulting the environment for every console line.
+            console_lines_per_second: env_usize("AGAPORNIS_CONSOLE_LINES_PER_SECOND", 2000),
+            console_strike_limit: env_usize("AGAPORNIS_CONSOLE_STRIKE_LIMIT", 3),
+            console_max_line_length: env_usize("AGAPORNIS_CONSOLE_MAX_LINE_LENGTH", 16384),
+            console_commands_per_5_seconds: env_usize(
+                "AGAPORNIS_CONSOLE_COMMANDS_PER_5_SECONDS",
+                20,
+            ),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -37,8 +60,6 @@ pub enum LineDecision {
 
 impl ProtectionState {
     pub fn observe_line(&self, id: &str) -> LineDecision {
-        let max = env_usize("AGAPORNIS_CONSOLE_LINES_PER_SECOND", 2000);
-        let strike_limit = env_usize("AGAPORNIS_CONSOLE_STRIKE_LIMIT", 3);
         let mut rates = self.console.lock().unwrap();
 
         let rate = rates.entry(id.into()).or_insert_with(|| ConsoleRate {
@@ -64,7 +85,7 @@ impl ProtectionState {
 
         rate.count += 1;
 
-        if rate.count <= max {
+        if rate.count <= self.console_lines_per_second {
             return LineDecision::Allow;
         }
 
@@ -76,7 +97,7 @@ impl ProtectionState {
         rate.strikes += 1;
         rate.last_strike = Some(Instant::now());
 
-        if rate.strikes >= strike_limit {
+        if rate.strikes >= self.console_strike_limit {
             LineDecision::Trip
         } else if rate.strikes == 1 {
             // Only send the Notify warning on the FIRST strike to prevent duplicated messages
@@ -88,11 +109,14 @@ impl ProtectionState {
     }
 
     pub fn max_line_length(&self) -> usize {
-        env_usize("AGAPORNIS_CONSOLE_MAX_LINE_LENGTH", 16384)
+        self.console_max_line_length
+    }
+
+    pub fn console_lines_per_second(&self) -> usize {
+        self.console_lines_per_second
     }
 
     pub fn accept_command(&self, id: &str) -> bool {
-        let limit = env_usize("AGAPORNIS_CONSOLE_COMMANDS_PER_5_SECONDS", 20);
         let mut rates = self.commands.lock().unwrap();
         let rate = rates.entry(id.to_owned()).or_insert(Rate {
             started: Instant::now(),
@@ -103,7 +127,7 @@ impl ProtectionState {
             rate.count = 0;
         }
         rate.count += 1;
-        rate.count <= limit
+        rate.count <= self.console_commands_per_5_seconds
     }
 
     pub fn status(&self, id: &str) -> Option<String> {

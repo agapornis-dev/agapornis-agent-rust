@@ -2,16 +2,41 @@ use super::*;
 
 use bollard::{
     container::{AttachContainerResults, LogOutput},
+    errors::Error as DockerError,
     exec::{CreateExecOptions, StartExecOptions, StartExecResults},
-    query_parameters::AttachContainerOptionsBuilder,
+    query_parameters::{AttachContainerOptionsBuilder, LogsOptionsBuilder},
 };
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 
 const CONSOLE_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const EXEC_OUTPUT_CAPACITY: usize = 1024 * 1024;
 const EXEC_CAPTURE_LIMIT: usize = 8 * 1024 * 1024;
 
 impl DockerManager {
+    /// Opens one Docker Engine log stream without spawning the Docker CLI.
+    ///
+    /// The first attachment asks Docker for a small bounded tail. Reattachments
+    /// use the last observed Docker timestamp so output produced while the
+    /// Engine connection was unavailable can be recovered by the caller.
+    pub(crate) fn follow_console_logs(
+        &self,
+        id: &str,
+        since: Option<i32>,
+    ) -> Pin<Box<dyn Stream<Item = std::result::Result<LogOutput, DockerError>> + Send>> {
+        let options = LogsOptionsBuilder::default()
+            .follow(true)
+            .stdout(true)
+            .stderr(true)
+            .timestamps(true);
+        let options = match since {
+            Some(timestamp) => options.since(timestamp).tail("all"),
+            None => options.tail("200"),
+        }
+        .build();
+
+        Box::pin(self.docker.logs(id, Some(options)))
+    }
+
     pub async fn send_command(&self, id: &str, command: &str) -> Result<()> {
         paths::validate_id(id)?;
 

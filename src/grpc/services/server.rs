@@ -13,11 +13,16 @@ impl proto::server_management_server::ServerManagement for ServerService {
     ) -> Result<Response<CreateServerResponse>, Status> {
         let (server_id, spec) = create_spec(request.into_inner());
         Ok(Response::new(match self.0.docker.create(spec).await {
-            Ok(port) => CreateServerResponse {
-                success: true,
-                assigned_host_port: port,
-                error_message: String::new(),
-            },
+            Ok(port) => {
+                if let Err(error) = self.0.console.track_server(&server_id).await {
+                    error!(server = %server_id, %error, "failed to track new server console");
+                }
+                CreateServerResponse {
+                    success: true,
+                    assigned_host_port: port,
+                    error_message: String::new(),
+                }
+            }
             Err(e) => {
                 error!(
                     server = %server_id,
@@ -41,6 +46,7 @@ impl proto::server_management_server::ServerManagement for ServerService {
     ) -> Result<Response<Self::CreateServerStreamStream>, Status> {
         let (server_id, spec) = create_spec(request.into_inner());
         let docker = self.0.docker.clone();
+        let console = self.0.console.clone();
         let (sender, receiver) = mpsc::unbounded_channel();
         let progress_sender = sender.clone();
 
@@ -57,15 +63,20 @@ impl proto::server_management_server::ServerManagement for ServerService {
                 .await;
 
             let final_message = match result {
-                Ok(port) => CreateServerProgress {
-                    phase: "complete".into(),
-                    progress: 100,
-                    message: "Server container is ready".into(),
-                    complete: true,
-                    success: true,
-                    assigned_host_port: port,
-                    ..Default::default()
-                },
+                Ok(port) => {
+                    if let Err(error) = console.track_server(&server_id).await {
+                        error!(server = %server_id, %error, "failed to track new server console");
+                    }
+                    CreateServerProgress {
+                        phase: "complete".into(),
+                        progress: 100,
+                        message: "Server container is ready".into(),
+                        complete: true,
+                        success: true,
+                        assigned_host_port: port,
+                        ..Default::default()
+                    }
+                }
                 Err(error) => {
                     error!(
                         server = %server_id,
@@ -94,9 +105,12 @@ impl proto::server_management_server::ServerManagement for ServerService {
         &self,
         r: Request<ServerActionRequest>,
     ) -> Result<Response<ServerActionResponse>, Status> {
-        Ok(Response::new(action(
-            self.0.docker.start(&r.into_inner().server_id).await,
-        )))
+        let id = r.into_inner().server_id;
+        let result = self.0.docker.start(&id).await;
+        if result.is_ok() {
+            let _ = self.0.console.refresh_server(&id).await;
+        }
+        Ok(Response::new(action(result)))
     }
     async fn stop_server(
         &self,
@@ -110,31 +124,36 @@ impl proto::server_management_server::ServerManagement for ServerService {
         &self,
         r: Request<ServerActionRequest>,
     ) -> Result<Response<ServerActionResponse>, Status> {
-        Ok(Response::new(action(
-            self.0.docker.restart(&r.into_inner().server_id).await,
-        )))
+        let id = r.into_inner().server_id;
+        let result = self.0.docker.restart(&id).await;
+        if result.is_ok() {
+            let _ = self.0.console.refresh_server(&id).await;
+        }
+        Ok(Response::new(action(result)))
     }
     async fn recreate_server(
         &self,
         r: Request<ServerActionRequest>,
     ) -> Result<Response<ServerActionResponse>, Status> {
-        Ok(Response::new(
-            match self.0.docker.recreate(&r.into_inner().server_id).await {
-                Ok(update) => ServerActionResponse {
+        let id = r.into_inner().server_id;
+        Ok(Response::new(match self.0.docker.recreate(&id).await {
+            Ok(update) => {
+                let _ = self.0.console.refresh_server(&id).await;
+                ServerActionResponse {
                     success: true,
                     error_message: String::new(),
                     image: update.image,
                     previous_image_id: update.previous_image_id,
                     image_id: update.image_id,
                     image_changed: update.image_changed,
-                },
-                Err(error) => ServerActionResponse {
-                    success: false,
-                    error_message: error.to_string(),
-                    ..Default::default()
-                },
+                }
+            }
+            Err(error) => ServerActionResponse {
+                success: false,
+                error_message: error.to_string(),
+                ..Default::default()
             },
-        ))
+        }))
     }
     async fn delete_server(
         &self,
@@ -206,6 +225,7 @@ impl proto::server_management_server::ServerManagement for ServerService {
         &self,
         _: Request<NodeStatsRequest>,
     ) -> Result<Response<NodeStatsResponse>, Status> {
+        let console_inventory_initialized = self.0.console.inventory_initialized().await;
         Ok(Response::new(match node::stats().await {
             Ok(s) => NodeStatsResponse {
                 cpu_percentage: s.cpu,
@@ -217,10 +237,14 @@ impl proto::server_management_server::ServerManagement for ServerService {
                 error_message: "".into(),
                 uptime_seconds: s.uptime,
                 cpu_count: s.cpus,
+                agent_instance_id: self.0.agent_instance_id.clone(),
+                console_inventory_initialized,
             },
             Err(e) => NodeStatsResponse {
                 status: "unhealthy".into(),
                 error_message: e.to_string(),
+                agent_instance_id: self.0.agent_instance_id.clone(),
+                console_inventory_initialized,
                 ..Default::default()
             },
         }))
@@ -309,28 +333,70 @@ impl proto::server_management_server::ServerManagement for ServerService {
         paths::validate_id(&id).map_err(|error| Status::invalid_argument(error.to_string()))?;
         self.0.docker.inspect(&id).await.map_err(internal)?;
 
-        let (history, receiver) = self.0.console.subscribe(&id).await;
+        let (history, replayed_through, receiver) = self
+            .0
+            .console
+            .subscribe(&id)
+            .await
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
         let replay = tokio_stream::iter(history.into_iter().map(|line| {
             Ok(ConsoleMessage {
                 log_line: line,
                 replayed: Some(true),
+                history_complete: None,
             })
         }));
-        let live = BroadcastStream::new(receiver).filter_map(|v| async move {
+        let history_complete = tokio_stream::once(Ok(ConsoleMessage {
+            log_line: String::new(),
+            replayed: Some(true),
+            history_complete: Some(true),
+        }));
+        let live = BroadcastStream::new(receiver).filter_map(move |v| async move {
             match v {
-                Ok(line) => Some(Ok(ConsoleMessage {
-                    log_line: line,
+                // The receiver is installed before the history snapshot so no
+                // line can be lost. Entries covered by that snapshot can also
+                // be queued in the receiver; discard them by sequence instead
+                // of replaying the Docker tail twice.
+                Ok(entry) if entry.sequence > replayed_through => Some(Ok(ConsoleMessage {
+                    log_line: entry.line,
                     replayed: Some(false),
+                    history_complete: None,
                 })),
+                Ok(_) => None,
                 Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
                     Some(Ok(ConsoleMessage {
                         log_line: format!("[agent] console stream dropped {n} lines"),
                         replayed: Some(false),
+                        history_complete: None,
                     }))
                 }
             }
         });
-        Ok(Response::new(Box::pin(replay.chain(live))))
+        Ok(Response::new(Box::pin(
+            replay.chain(history_complete).chain(live),
+        )))
+    }
+    async fn sync_console_servers(
+        &self,
+        r: Request<ConsoleServerInventoryRequest>,
+    ) -> Result<Response<ConsoleServerInventoryResponse>, Status> {
+        let server_ids = r.into_inner().server_ids;
+        Ok(Response::new(
+            match self.0.console.synchronize_servers(server_ids).await {
+                Ok(result) => ConsoleServerInventoryResponse {
+                    success: true,
+                    active_reader_count: usize_to_i32(result.active_reader_count),
+                    accepted_count: usize_to_i32(result.accepted_count),
+                    removed_count: usize_to_i32(result.removed_count),
+                    error_message: String::new(),
+                },
+                Err(error) => ConsoleServerInventoryResponse {
+                    success: false,
+                    error_message: error.to_string(),
+                    ..Default::default()
+                },
+            },
+        ))
     }
     async fn get_update_status(
         &self,
@@ -430,6 +496,10 @@ impl proto::server_management_server::ServerManagement for ServerService {
             },
         }))
     }
+}
+
+fn usize_to_i32(value: usize) -> i32 {
+    value.min(i32::MAX as usize) as i32
 }
 
 fn create_spec(r: CreateServerRequest) -> (String, CreateSpec) {

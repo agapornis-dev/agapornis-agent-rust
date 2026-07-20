@@ -119,7 +119,9 @@ async fn scan_once(
         observations.remove(&id);
         disk_due.remove(&id);
         docker.forget_runtime_state(&id).await;
-        console.remove(&id).await;
+        // A temporary gap during container recreation does not revoke the
+        // API's desired server assignment or discard its warm console history.
+        console.detach_reader(&id).await;
     }
 
     for id in &active {
@@ -132,6 +134,9 @@ async fn scan_once(
             .pointer("/State/Running")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        if running {
+            console.wake_reader(id).await;
+        }
         let exit = inspect
             .pointer("/State/ExitCode")
             .and_then(Value::as_i64)

@@ -1,8 +1,8 @@
 use super::*;
 
 use bollard::models::{
-    ContainerCreateBody, EndpointSettings, HealthConfig, HostConfig, Mount, MountType,
-    NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+    ContainerCreateBody, EndpointSettings, HealthConfig, HostConfig, HostConfigLogConfig, Mount,
+    MountType, NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
 
 struct ServerPorts {
@@ -41,6 +41,18 @@ pub(super) fn build_container(
             maximum_retry_count: Some(2),
         }),
         security_opt: Some(vec!["no-new-privileges".into()]),
+        // Keep Docker's backing store bounded now that the daemon follows every
+        // assigned server continuously. These are the conservative Wings
+        // defaults: efficient local storage, one 5 MiB segment, non-blocking.
+        log_config: Some(HostConfigLogConfig {
+            typ: Some("local".into()),
+            config: Some(HashMap::from([
+                ("max-size".into(), "5m".into()),
+                ("max-file".into(), "1".into()),
+                ("compress".into(), "false".into()),
+                ("mode".into(), "non-blocking".into()),
+            ])),
+        }),
         memory: (spec.memory_bytes > 0).then_some(spec.memory_bytes),
         memory_swap,
         cpuset_cpus,

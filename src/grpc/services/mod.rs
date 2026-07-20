@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::{
     fs,
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
     sync::{Mutex, broadcast},
 };
@@ -41,6 +41,7 @@ pub struct AppState {
     pub update: UpdateManager,
     pub certificates: CertificateManager,
     pub config: DaemonConfig,
+    pub agent_instance_id: String,
 }
 impl AppState {
     pub async fn new(
@@ -51,7 +52,7 @@ impl AppState {
 
         let docker = Arc::new(DockerManager::connect_with_retry(protection.clone()).await);
 
-        let console = Arc::new(ConsoleHub::new(protection.clone()));
+        let console = Arc::new(ConsoleHub::new(docker.clone(), protection.clone()));
 
         Ok(Self {
             files: Files::new(docker.clone()),
@@ -62,6 +63,7 @@ impl AppState {
             docker,
             protection,
             console,
+            agent_instance_id: uuid::Uuid::new_v4().to_string(),
         })
     }
 }

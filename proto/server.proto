@@ -18,6 +18,7 @@ service ServerManagement {
   rpc SendCommand (SendCommandRequest) returns (ServerActionResponse);
   rpc TestDatabaseConnection (DatabaseConnectionTestRequest) returns (DatabaseConnectionTestResponse);
   rpc StreamConsole (ServerActionRequest) returns (stream ConsoleMessage);
+  rpc SyncConsoleServers (ConsoleServerInventoryRequest) returns (ConsoleServerInventoryResponse);
   rpc GetUpdateStatus (UpdateStatusRequest) returns (UpdateStatusResponse);
   rpc ApplyUpdate (ApplyUpdateRequest) returns (ApplyUpdateResponse);
   rpc RestartForUpdate (RestartForUpdateRequest) returns (RestartForUpdateResponse);
@@ -93,14 +94,22 @@ message UpdateServerConfigurationRequest {
 }
 message ServerMetricsResponse { int64 memory_usage_bytes = 1; int64 memory_limit_bytes = 2; double cpu_percentage = 3; int64 network_read_bytes = 4; int64 network_write_bytes = 5; int64 disk_usage_bytes = 6; int64 disk_limit_bytes = 7; string status = 8; int64 uptime_seconds = 9; }
 message NodeStatsRequest {}
-message NodeStatsResponse { double cpu_percentage = 1; int64 memory_usage_bytes = 2; int64 memory_total_bytes = 3; int64 disk_usage_bytes = 4; int64 disk_total_bytes = 5; string status = 6; string error_message = 7; int64 uptime_seconds = 8; int32 cpu_count = 9; }
+message NodeStatsResponse { double cpu_percentage = 1; int64 memory_usage_bytes = 2; int64 memory_total_bytes = 3; int64 disk_usage_bytes = 4; int64 disk_total_bytes = 5; string status = 6; string error_message = 7; int64 uptime_seconds = 8; int32 cpu_count = 9; string agent_instance_id = 10; bool console_inventory_initialized = 11; }
 message CrowdSecAlertsRequest {}
 message CrowdSecAlert { string id = 1; string created_at = 2; string scenario = 3; string message = 4; string source_scope = 5; string source_value = 6; string source_ip = 7; string source_country = 8; string source_as_name = 9; int32 events_count = 10; bool simulated = 11; bool remediation = 12; string decision_type = 13; string decision_duration = 14; }
 message CrowdSecAlertsResponse { bool enabled = 1; bool supported = 2; string status = 3; string error_message = 4; string collected_at = 5; repeated CrowdSecAlert alerts = 6; }
 message SendCommandRequest { string server_id = 1; string command = 2; }
 message DatabaseConnectionTestRequest { string server_id = 1; string database_type = 2; string host = 3; int32 port = 4; string database_name = 5; string username = 6; string password = 7; string docker_image = 8; }
 message DatabaseConnectionTestResponse { bool success = 1; string error_message = 2; int64 latency_ms = 3; }
-message ConsoleMessage { string log_line = 1; optional bool replayed = 2; }
+message ConsoleMessage { string log_line = 1; optional bool replayed = 2; optional bool history_complete = 3; }
+message ConsoleServerInventoryRequest { repeated string server_ids = 1; }
+message ConsoleServerInventoryResponse {
+  bool success = 1;
+  int32 active_reader_count = 2;
+  int32 accepted_count = 3;
+  int32 removed_count = 4;
+  string error_message = 5;
+}
 message UpdateStatusRequest {}
 message UpdateStatusResponse { string version = 1; string runtime_identifier = 2; string executable_path = 3; string staging_directory = 4; bool restart_required = 5; string pending_artifact = 6; }
 message ApplyUpdateRequest { string artifact_url = 1; string sha256 = 2; }

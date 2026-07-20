@@ -102,11 +102,11 @@ impl DockerManager {
         let mut status = if container_running {
             "running".into()
         } else {
-            inspect
+            let docker_status = inspect
                 .pointer("/State/Status")
                 .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .into()
+                .unwrap_or("unknown");
+            normalized_container_status(docker_status).into()
         };
 
         if let Some(value) = self.protection.status(id) {
@@ -259,6 +259,14 @@ fn inactive_metrics(
     })
 }
 
+fn normalized_container_status(status: &str) -> &str {
+    if status == "exited" {
+        "offline"
+    } else {
+        status
+    }
+}
+
 fn resource_metrics(stat: &bollard::models::ContainerStatsResponse) -> ResourceMetrics {
     let (memory_usage, memory_limit) = stat
         .memory_stats
@@ -398,9 +406,10 @@ mod tests {
 
     #[test]
     fn running_startup_state_still_collects_live_resources() {
+        assert_eq!(normalized_container_status("exited"), "offline");
         assert!(inactive_metrics(true, "starting".into(), 10, 20, 30).is_none());
-        let stopped = inactive_metrics(false, "exited".into(), 10, 20, 0).unwrap();
-        assert_eq!(stopped.status, "exited");
+        let stopped = inactive_metrics(false, "offline".into(), 10, 20, 0).unwrap();
+        assert_eq!(stopped.status, "offline");
         assert_eq!(stopped.disk_usage, 10);
     }
 
