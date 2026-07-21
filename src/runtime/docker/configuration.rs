@@ -1,6 +1,9 @@
 use super::*;
 
-use bollard::{errors::Error as BollardError, models::NetworkCreateRequest};
+use bollard::{
+    errors::Error as BollardError,
+    models::{HostConfig, NetworkCreateRequest},
+};
 #[cfg(test)]
 use serde_json::Map;
 
@@ -19,6 +22,10 @@ use xml::apply_xml_parser;
 
 const MAX_CONFIG_FILE_SIZE: u64 = 8 * 1024 * 1024;
 const STARTUP_TARGET_CHECK_ATTEMPTS: usize = 10;
+const XDG_RUNTIME_DIR_KEY: &str = "XDG_RUNTIME_DIR";
+const MANAGED_XDG_RUNTIME_DIR: &str = "/tmp/agapornis-runtime";
+const MANAGED_XDG_RUNTIME_TMPFS_OPTIONS: &str =
+    "rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=999,gid=999";
 #[cfg(not(test))]
 const STARTUP_TARGET_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 #[cfg(test)]
@@ -42,6 +49,87 @@ impl std::fmt::Display for MissingStartupTarget {
 }
 
 impl std::error::Error for MissingStartupTarget {}
+
+pub(super) fn runtime_environment(values: &[String]) -> Vec<String> {
+    let configured = values
+        .iter()
+        .rev()
+        .find_map(|entry| {
+            entry
+                .split_once('=')
+                .filter(|(key, _)| *key == XDG_RUNTIME_DIR_KEY)
+        })
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(MANAGED_XDG_RUNTIME_DIR);
+
+    values
+        .iter()
+        .filter(|entry| {
+            entry
+                .split_once('=')
+                .is_none_or(|(key, _)| key != XDG_RUNTIME_DIR_KEY)
+        })
+        .cloned()
+        .chain([format!("{XDG_RUNTIME_DIR_KEY}={configured}")])
+        .collect()
+}
+
+pub(super) fn ensure_runtime_tmpfs(host_config: &mut HostConfig, environment: &[String]) {
+    if runtime_environment_value(environment) != Some(MANAGED_XDG_RUNTIME_DIR) {
+        return;
+    }
+
+    host_config.tmpfs.get_or_insert_default().insert(
+        MANAGED_XDG_RUNTIME_DIR.into(),
+        MANAGED_XDG_RUNTIME_TMPFS_OPTIONS.into(),
+    );
+}
+
+pub(super) fn runtime_tmpfs_ready(
+    host_config: Option<&HostConfig>,
+    environment: &[String],
+) -> bool {
+    if runtime_environment_value(environment) != Some(MANAGED_XDG_RUNTIME_DIR) {
+        return true;
+    }
+
+    host_config
+        .and_then(|config| config.tmpfs.as_ref())
+        .and_then(|tmpfs| tmpfs.get(MANAGED_XDG_RUNTIME_DIR))
+        .is_some_and(|options| options == MANAGED_XDG_RUNTIME_TMPFS_OPTIONS)
+}
+
+pub(super) fn runtime_configuration_ready(inspect: &Value) -> bool {
+    let environment = inspect
+        .pointer("/Config/Env")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    match runtime_environment_value(&environment) {
+        Some(value) if !value.trim().is_empty() && value != MANAGED_XDG_RUNTIME_DIR => true,
+        Some(MANAGED_XDG_RUNTIME_DIR) => inspect
+            .pointer("/HostConfig/Tmpfs")
+            .and_then(Value::as_object)
+            .and_then(|tmpfs| tmpfs.get(MANAGED_XDG_RUNTIME_DIR))
+            .and_then(Value::as_str)
+            .is_some_and(|options| options == MANAGED_XDG_RUNTIME_TMPFS_OPTIONS),
+        _ => false,
+    }
+}
+
+fn runtime_environment_value(values: &[String]) -> Option<&str> {
+    values.iter().rev().find_map(|entry| {
+        entry
+            .split_once('=')
+            .filter(|(key, _)| *key == XDG_RUNTIME_DIR_KEY)
+            .map(|(_, value)| value)
+    })
+}
 
 impl DockerManager {
     pub(super) async fn ensure_network(&self, name: &str) -> Result<()> {

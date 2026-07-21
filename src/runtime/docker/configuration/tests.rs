@@ -5,6 +5,61 @@ fn replacements(value: Value) -> Map<String, Value> {
     value.as_object().unwrap().clone()
 }
 
+#[test]
+fn runtime_environment_gets_a_private_managed_xdg_directory() {
+    let environment = runtime_environment(&["SERVER_PORT=25565".into(), "XDG_RUNTIME_DIR=".into()]);
+    assert_eq!(
+        environment,
+        [
+            "SERVER_PORT=25565",
+            "XDG_RUNTIME_DIR=/tmp/agapornis-runtime"
+        ]
+    );
+
+    let mut host_config = HostConfig::default();
+    ensure_runtime_tmpfs(&mut host_config, &environment);
+    assert!(runtime_tmpfs_ready(Some(&host_config), &environment));
+    assert_eq!(
+        host_config
+            .tmpfs
+            .as_ref()
+            .and_then(|tmpfs| tmpfs.get("/tmp/agapornis-runtime"))
+            .map(String::as_str),
+        Some("rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=999,gid=999")
+    );
+}
+
+#[test]
+fn explicit_xdg_runtime_directory_is_preserved() {
+    let environment = runtime_environment(&["XDG_RUNTIME_DIR=/run/custom-runtime".into()]);
+    assert_eq!(environment, ["XDG_RUNTIME_DIR=/run/custom-runtime"]);
+
+    let mut host_config = HostConfig::default();
+    ensure_runtime_tmpfs(&mut host_config, &environment);
+    assert_eq!(host_config.tmpfs, None);
+    assert!(runtime_tmpfs_ready(Some(&host_config), &environment));
+}
+
+#[test]
+fn legacy_container_configuration_is_marked_for_runtime_repair() {
+    let legacy = json!({
+        "Config": {"Env": ["SERVER_PORT=25565"]},
+        "HostConfig": {"Tmpfs": {}}
+    });
+    assert!(!runtime_configuration_ready(&legacy));
+
+    let managed = json!({
+        "Config": {"Env": ["XDG_RUNTIME_DIR=/tmp/agapornis-runtime"]},
+        "HostConfig": {
+            "Tmpfs": {
+                "/tmp/agapornis-runtime":
+                    "rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=999,gid=999"
+            }
+        }
+    });
+    assert!(runtime_configuration_ready(&managed));
+}
+
 #[tokio::test]
 async fn startup_validation_waits_for_a_delayed_installer_target() {
     let root = std::env::temp_dir().join(format!("agapornis-startup-test-{}", Uuid::new_v4()));

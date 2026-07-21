@@ -22,6 +22,7 @@ pub(super) fn build_container(
     let ports = server_ports(spec, host_port)?;
     let cpus = effective_cpus(spec.cpu_limit_percentage, spec.cpu_cores);
     let cpuset_cpus = pinned_cpu_set(&spec.cpu_pinned_threads)?;
+    let environment = runtime_environment(&spec.env);
     let memory_swap = (spec.memory_bytes > 0).then_some(
         spec.memory_bytes
             .saturating_add(spec.swap_memory_bytes.max(0)),
@@ -35,7 +36,7 @@ pub(super) fn build_container(
         retries: Some(5),
         ..Default::default()
     });
-    let host_config = HostConfig {
+    let mut host_config = HostConfig {
         mounts: Some(mounts),
         network_mode: Some(network.to_owned()),
         pids_limit: Some(512),
@@ -63,6 +64,7 @@ pub(super) fn build_container(
         port_bindings: (!ports.bindings.is_empty()).then_some(ports.bindings),
         ..Default::default()
     };
+    ensure_runtime_tmpfs(&mut host_config, &environment);
 
     let mut endpoint_configs = HashMap::new();
     endpoint_configs.insert(
@@ -84,7 +86,7 @@ pub(super) fn build_container(
         attach_stdin: Some(true),
         attach_stdout: Some(true),
         attach_stderr: Some(true),
-        env: (!spec.env.is_empty()).then_some(spec.env.clone()),
+        env: Some(environment),
         cmd: server_command(spec),
         healthcheck,
         labels: Some(labels),
@@ -200,5 +202,61 @@ fn server_command(spec: &CreateSpec) -> Option<Vec<String>> {
         ])
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_container_includes_a_valid_xdg_runtime_directory() {
+        let spec = CreateSpec {
+            server_id: "test-server".into(),
+            image: "example/server:latest".into(),
+            internal_port: "25565".into(),
+            env: Vec::new(),
+            memory_bytes: 0,
+            cpu_limit_percentage: 0,
+            cpu_cores: 0.0,
+            disk_limit_bytes: 0,
+            cpu_pinning: false,
+            cpu_pinned_threads: String::new(),
+            swap_memory_bytes: 0,
+            swap_memory_storage: String::new(),
+            startup_command: "./server".into(),
+            stop_command: String::new(),
+            startup_done: String::new(),
+            install_image: String::new(),
+            install_entrypoint: String::new(),
+            install_script: String::new(),
+            config_files_json: String::new(),
+            host_port: 0,
+            network_owner_id: String::new(),
+            expose_public_port: false,
+            port_mappings: Vec::new(),
+        };
+
+        let container = build_container(
+            &spec,
+            Path::new("/var/lib/agapornis/servers/test-server"),
+            "agapornis_ntw",
+            paths::HOME_CONTAINER_PATH.into(),
+            0,
+        )
+        .unwrap();
+
+        assert!(container.env.as_ref().is_some_and(|environment| {
+            environment.contains(&"XDG_RUNTIME_DIR=/tmp/agapornis-runtime".into())
+        }));
+        assert_eq!(
+            container
+                .host_config
+                .as_ref()
+                .and_then(|config| config.tmpfs.as_ref())
+                .and_then(|tmpfs| tmpfs.get("/tmp/agapornis-runtime"))
+                .map(String::as_str),
+            Some("rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=999,gid=999")
+        );
     }
 }

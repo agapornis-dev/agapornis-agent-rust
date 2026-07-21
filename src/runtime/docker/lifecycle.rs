@@ -15,10 +15,9 @@ impl DockerManager {
     pub async fn start(&self, id: &str) -> Result<()> {
         paths::validate_id(id)?;
 
-        let needs_bind_repair = self
-            .inspect(id)
-            .await
-            .ok()
+        let inspect = self.inspect(id).await.ok();
+        let needs_bind_repair = inspect
+            .as_ref()
             .and_then(|inspect| {
                 inspect
                     .pointer("/State/Error")
@@ -26,10 +25,16 @@ impl DockerManager {
                     .map(stale_docker_desktop_bind_message)
             })
             .unwrap_or(false);
-        if needs_bind_repair {
+        let needs_runtime_repair = inspect.as_ref().is_some_and(|inspect| {
+            inspect.pointer("/State/Running").and_then(Value::as_bool) != Some(true)
+                && !runtime_configuration_ready(inspect)
+        });
+        if needs_bind_repair || needs_runtime_repair {
             tracing::warn!(
                 container_id = %id,
-                "repairing the stale Docker Desktop bind source recorded by the previous start"
+                needs_bind_repair,
+                needs_runtime_repair,
+                "repairing stale managed Docker container configuration before start"
             );
             self.recreate_with_fresh_bind_mounts(id).await?;
         }

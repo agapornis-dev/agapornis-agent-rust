@@ -49,10 +49,13 @@ impl DockerManager {
                 format!("exec {startup_command}"),
             ]
         });
-        let merged_env = merged_environment(config.env.as_deref(), env);
+        let desired_environment = runtime_environment(&env);
+        let merged_env = merged_environment(config.env.as_deref(), desired_environment);
+        let runtime_tmpfs_changed = !runtime_tmpfs_ready(inspect.host_config.as_ref(), &merged_env);
         let configuration_changed = normalized_environment(config.env.as_deref())
             != normalized_environment(Some(&merged_env))
             || config.cmd != desired_command
+            || runtime_tmpfs_changed
             || labels
                 .get("agapornis.stop_command")
                 .map(String::as_str)
@@ -395,10 +398,14 @@ fn reusable_networks(
 }
 
 fn create_body(
-    config: bollard::models::ContainerConfig,
-    host_config: bollard::models::HostConfig,
+    mut config: bollard::models::ContainerConfig,
+    mut host_config: bollard::models::HostConfig,
     networking_config: NetworkingConfig,
 ) -> Result<ContainerCreateBody> {
+    let environment = runtime_environment(config.env.as_deref().unwrap_or_default());
+    config.env = Some(environment.clone());
+    ensure_runtime_tmpfs(&mut host_config, &environment);
+
     let mut value =
         serde_json::to_value(config).context("serialize stale container configuration")?;
     let object = value
