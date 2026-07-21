@@ -1,9 +1,8 @@
 use super::*;
 
 use bollard::{
-    config::RestartPolicyNameEnum,
     errors::Error as BollardError,
-    models::{ContainerUpdateBody, RestartPolicy},
+    models::ContainerUpdateBody,
     query_parameters::{
         KillContainerOptionsBuilder, RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
     },
@@ -29,11 +28,16 @@ impl DockerManager {
             inspect.pointer("/State/Running").and_then(Value::as_bool) != Some(true)
                 && !runtime_configuration_ready(inspect)
         });
-        if needs_bind_repair || needs_runtime_repair {
+        let needs_launcher_repair = inspect.as_ref().is_some_and(|inspect| {
+            inspect.pointer("/State/Running").and_then(Value::as_bool) != Some(true)
+                && runtime_launcher_repair_needed(inspect)
+        });
+        if needs_bind_repair || needs_runtime_repair || needs_launcher_repair {
             tracing::warn!(
                 container_id = %id,
                 needs_bind_repair,
                 needs_runtime_repair,
+                needs_launcher_repair,
                 "repairing stale managed Docker container configuration before start"
             );
             self.recreate_with_fresh_bind_mounts(id).await?;
@@ -45,7 +49,7 @@ impl DockerManager {
         self.startup_ready.lock().await.remove(id);
         self.startup_checks.lock().await.remove(id);
 
-        self.apply_restart_policy(id).await?;
+        self.apply_manual_restart_policy(id).await?;
         match self.start_with_console(id).await {
             Ok(()) => Ok(()),
             Err(error) if stale_docker_desktop_bind_error(&error) => {
@@ -76,7 +80,7 @@ impl DockerManager {
             .trim();
 
         if !stop_command.is_empty() {
-            self.disable_restart_policy(id).await?;
+            self.apply_manual_restart_policy(id).await?;
         }
 
         if stop_command == "^C" {
@@ -336,19 +340,16 @@ impl DockerManager {
         Ok(())
     }
 
-    async fn apply_restart_policy(&self, id: &str) -> Result<()> {
+    async fn apply_manual_restart_policy(&self, id: &str) -> Result<()> {
         let update = ContainerUpdateBody {
-            restart_policy: Some(RestartPolicy {
-                name: Some(RestartPolicyNameEnum::ON_FAILURE),
-                maximum_retry_count: Some(2),
-            }),
+            restart_policy: Some(manual_restart_policy()),
             ..Default::default()
         };
 
         self.docker
             .update_container(id, update)
             .await
-            .with_context(|| format!("set restart policy for Docker container {id}"))
+            .with_context(|| format!("disable automatic restart for Docker container {id}"))
     }
 
     async fn apply_server_config(&self, id: &str) -> Result<()> {
@@ -377,23 +378,6 @@ impl DockerManager {
         let (root, _, _, _) = self.root(id).await?;
 
         apply_config_files(&root, &descriptor, &docker_interface).await
-    }
-
-    async fn disable_restart_policy(&self, id: &str) -> Result<()> {
-        let update = ContainerUpdateBody {
-            restart_policy: Some(RestartPolicy {
-                name: Some(RestartPolicyNameEnum::NO),
-                maximum_retry_count: Some(0),
-            }),
-            ..Default::default()
-        };
-
-        self.docker
-            .update_container(id, update)
-            .await
-            .with_context(|| {
-                format!("disable restart policy before stopping Docker container {id}")
-            })
     }
 
     async fn force_graceful_stop(&self, id: &str) -> Result<()> {

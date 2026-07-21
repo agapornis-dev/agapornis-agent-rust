@@ -60,6 +60,37 @@ fn legacy_container_configuration_is_marked_for_runtime_repair() {
     assert!(runtime_configuration_ready(&managed));
 }
 
+#[test]
+fn legacy_startup_is_upgraded_to_the_xvfb_aware_launcher() {
+    let legacy = json!({
+        "Config": {"Cmd": ["/bin/sh", "-lc", "exec wine ./DedicatedServer.exe"]}
+    });
+    assert!(runtime_launcher_repair_needed(&legacy));
+
+    let mut command = Some(vec![
+        "/bin/sh".into(),
+        "-lc".into(),
+        "exec wine ./DedicatedServer.exe".into(),
+    ]);
+    assert!(repair_legacy_runtime_command(&mut command));
+    let command = command.unwrap();
+    assert_eq!(
+        command.get(4).map(String::as_str),
+        Some("exec wine ./DedicatedServer.exe")
+    );
+    assert!(command[2].contains("xvfb-run --auto-servernum"));
+    assert!(!runtime_launcher_repair_needed(&json!({
+        "Config": {"Cmd": command}
+    })));
+}
+
+#[test]
+fn managed_containers_do_not_retry_failed_processes() {
+    let policy = manual_restart_policy();
+    assert_eq!(policy.name, Some(RestartPolicyNameEnum::NO));
+    assert_eq!(policy.maximum_retry_count, Some(0));
+}
+
 #[tokio::test]
 async fn startup_validation_waits_for_a_delayed_installer_target() {
     let root = std::env::temp_dir().join(format!("agapornis-startup-test-{}", Uuid::new_v4()));

@@ -2,7 +2,7 @@ use super::*;
 
 use bollard::models::{
     ContainerCreateBody, EndpointSettings, HealthConfig, HostConfig, HostConfigLogConfig, Mount,
-    MountType, NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+    MountType, NetworkingConfig, PortBinding,
 };
 
 struct ServerPorts {
@@ -40,10 +40,10 @@ pub(super) fn build_container(
         mounts: Some(mounts),
         network_mode: Some(network.to_owned()),
         pids_limit: Some(512),
-        restart_policy: Some(RestartPolicy {
-            name: Some(RestartPolicyNameEnum::ON_FAILURE),
-            maximum_retry_count: Some(2),
-        }),
+        // A panel Start action represents one process launch. Automatic
+        // retries obscure the real failure and used to make one click look
+        // like three separate starts.
+        restart_policy: Some(manual_restart_policy()),
         security_opt: Some(vec!["no-new-privileges".into()]),
         // Keep Docker's backing store bounded now that the daemon follows every
         // assigned server continuously. These are the conservative Wings
@@ -195,11 +195,7 @@ fn server_command(spec: &CreateSpec) -> Option<Vec<String>> {
     if let Some(db_port) = database_port(&spec.env) {
         Some(vec![format!("--port={db_port}")])
     } else if !spec.startup_command.trim().is_empty() {
-        Some(vec![
-            "/bin/sh".into(),
-            "-lc".into(),
-            format!("exec {}", spec.startup_command),
-        ])
+        runtime_server_command(&spec.startup_command)
     } else {
         None
     }
@@ -258,5 +254,17 @@ mod tests {
                 .map(String::as_str),
             Some("rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=999,gid=999")
         );
+        assert_eq!(
+            container
+                .host_config
+                .as_ref()
+                .and_then(|config| config.restart_policy.as_ref()),
+            Some(&manual_restart_policy())
+        );
+        let command = container.cmd.expect("managed startup command");
+        assert_eq!(command.get(4).map(String::as_str), Some("exec ./server"));
+        assert!(command.get(2).is_some_and(|launcher| {
+            launcher.contains("${XVFB:-0}") && launcher.contains("xvfb-run --auto-servernum")
+        }));
     }
 }

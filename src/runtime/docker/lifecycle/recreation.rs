@@ -42,13 +42,7 @@ impl DockerManager {
             );
         }
 
-        let desired_command = (!startup_command.trim().is_empty()).then(|| {
-            vec![
-                "/bin/sh".into(),
-                "-lc".into(),
-                format!("exec {startup_command}"),
-            ]
-        });
+        let desired_command = runtime_server_command(startup_command);
         let desired_environment = runtime_environment(&env);
         let merged_env = merged_environment(config.env.as_deref(), desired_environment);
         let runtime_tmpfs_changed = !runtime_tmpfs_ready(inspect.host_config.as_ref(), &merged_env);
@@ -402,9 +396,11 @@ fn create_body(
     mut host_config: bollard::models::HostConfig,
     networking_config: NetworkingConfig,
 ) -> Result<ContainerCreateBody> {
+    repair_legacy_runtime_command(&mut config.cmd);
     let environment = runtime_environment(config.env.as_deref().unwrap_or_default());
     config.env = Some(environment.clone());
     ensure_runtime_tmpfs(&mut host_config, &environment);
+    host_config.restart_policy = Some(manual_restart_policy());
 
     let mut value =
         serde_json::to_value(config).context("serialize stale container configuration")?;

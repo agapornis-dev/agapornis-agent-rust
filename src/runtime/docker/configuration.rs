@@ -2,7 +2,7 @@ use super::*;
 
 use bollard::{
     errors::Error as BollardError,
-    models::{HostConfig, NetworkCreateRequest},
+    models::{HostConfig, NetworkCreateRequest, RestartPolicy, RestartPolicyNameEnum},
 };
 #[cfg(test)]
 use serde_json::Map;
@@ -26,6 +26,16 @@ const XDG_RUNTIME_DIR_KEY: &str = "XDG_RUNTIME_DIR";
 const MANAGED_XDG_RUNTIME_DIR: &str = "/tmp/agapornis-runtime";
 const MANAGED_XDG_RUNTIME_TMPFS_OPTIONS: &str =
     "rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=999,gid=999";
+const RUNTIME_LAUNCHER: &str = r#"case "${XVFB:-0}" in
+    1|true|TRUE|yes|YES)
+        if command -v xvfb-run >/dev/null 2>&1; then
+            exec xvfb-run --auto-servernum \
+                --server-args="-screen 0 ${DISPLAY_WIDTH:-1024}x${DISPLAY_HEIGHT:-768}x${DISPLAY_DEPTH:-16} -nolisten tcp" \
+                /bin/sh -lc "$1"
+        fi
+        ;;
+esac
+exec /bin/sh -lc "$1""#;
 #[cfg(not(test))]
 const STARTUP_TARGET_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 #[cfg(test)]
@@ -73,6 +83,69 @@ pub(super) fn runtime_environment(values: &[String]) -> Vec<String> {
         .cloned()
         .chain([format!("{XDG_RUNTIME_DIR_KEY}={configured}")])
         .collect()
+}
+
+/// Build the managed server command without interpolating the configured
+/// startup string into the launcher shell. Wine images that opt into XVFB get
+/// a ready virtual display before the workload begins; all other images keep
+/// the ordinary shell startup behavior.
+pub(super) fn runtime_server_command(startup: &str) -> Option<Vec<String>> {
+    (!startup.trim().is_empty()).then(|| {
+        vec![
+            "/bin/sh".into(),
+            "-lc".into(),
+            RUNTIME_LAUNCHER.into(),
+            "agapornis-runtime".into(),
+            format!("exec {startup}"),
+        ]
+    })
+}
+
+pub(super) fn legacy_runtime_command(command: &[String]) -> Option<&str> {
+    match command {
+        [shell, option, startup] if shell == "/bin/sh" && option == "-lc" => startup
+            .strip_prefix("exec ")
+            .filter(|startup| !startup.trim().is_empty()),
+        _ => None,
+    }
+}
+
+pub(super) fn runtime_launcher_repair_needed(inspect: &Value) -> bool {
+    let Some(command) = inspect
+        .pointer("/Config/Cmd")
+        .and_then(Value::as_array)
+        .map(|command| {
+            command
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+    else {
+        return false;
+    };
+
+    legacy_runtime_command(&command).is_some()
+}
+
+pub(super) fn repair_legacy_runtime_command(command: &mut Option<Vec<String>>) -> bool {
+    let Some(startup) = command
+        .as_deref()
+        .and_then(legacy_runtime_command)
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+
+    *command = runtime_server_command(&startup);
+    true
+}
+
+pub(super) fn manual_restart_policy() -> RestartPolicy {
+    RestartPolicy {
+        name: Some(RestartPolicyNameEnum::NO),
+        maximum_retry_count: Some(0),
+    }
 }
 
 pub(super) fn ensure_runtime_tmpfs(host_config: &mut HostConfig, environment: &[String]) {
