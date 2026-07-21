@@ -14,8 +14,26 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 const INSTALLER_LOG_FILE_LIMIT: usize = 8 * 1024 * 1024;
+const INSTALLER_LOG_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const INSTALLER_ATTEMPTS: usize = 2;
 const INSTALLER_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+#[derive(Debug, PartialEq, Eq)]
+struct ProvisionedPayloadDiskLimitExceeded {
+    usage: i64,
+    limit: i64,
+}
+
+impl std::fmt::Display for ProvisionedPayloadDiskLimitExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Completed server files exceed the disk allocation ({} / {} bytes). Increase the \
+             server disk allocation or reduce the installed payload before retrying.",
+            self.usage, self.limit
+        )
+    }
+}
 
 enum InstallerPostcondition {
     Ready,
@@ -72,10 +90,9 @@ impl DockerManager {
                     host_source.clone(),
                     script_source.clone(),
                 );
-                let create_options = CreateContainerOptionsBuilder::default().name(&name).build();
 
                 let attempt_result = self
-                    .execute_installer(&name, host, create_options, config, report, attempt)
+                    .execute_installer(&name, host, config, report, attempt)
                     .await;
                 self.cleanup_installer_container(&name).await;
                 attempt_result?;
@@ -124,15 +141,30 @@ impl DockerManager {
         result
     }
 
+    pub(super) async fn ensure_provisioned_payload_disk_limit(
+        &self,
+        host: &Path,
+        limit: i64,
+    ) -> Result<()> {
+        if limit <= 0 {
+            return Ok(());
+        }
+        let usage = self.measure_directory_usage(host.to_owned()).await?;
+        if let Some(exceeded) = provisioned_payload_disk_limit_exceeded(usage, limit) {
+            bail!(exceeded.to_string());
+        }
+        Ok(())
+    }
+
     async fn execute_installer(
         &self,
         name: &str,
         host: &Path,
-        create_options: bollard::query_parameters::CreateContainerOptions,
         config: ContainerCreateBody,
         report: &ProvisioningReporter,
         attempt: usize,
     ) -> Result<()> {
+        let create_options = CreateContainerOptionsBuilder::default().name(name).build();
         self.docker
             .create_container(Some(create_options), config)
             .await
@@ -178,28 +210,68 @@ impl DockerManager {
         let mut log_file_bytes = 0usize;
         let mut log_tail = Vec::new();
 
-        while let Some(item) = output.next().await {
-            let bytes = item.context("read installer output")?.into_bytes();
-            let remaining = INSTALLER_LOG_FILE_LIMIT.saturating_sub(log_file_bytes);
-            let persisted = bytes.len().min(remaining);
-            if persisted > 0 {
-                log_file.write_all(&bytes[..persisted]).await?;
-                log_file_bytes += persisted;
-            }
-            append_tail(&mut log_tail, &bytes, INSTALLER_LOG_TAIL_BYTES);
-        }
-
         let wait_options = WaitContainerOptionsBuilder::default()
             .condition("not-running")
             .build();
-        let wait_result = self
-            .docker
-            .wait_container(name, Some(wait_options))
-            .next()
-            .await
-            .context("installer wait stream ended unexpectedly")?;
+        let mut wait_stream = self.docker.wait_container(name, Some(wait_options));
+        let mut output_closed = false;
+
+        // The attach stream is only a log transport and may close independently
+        // of the container. Treat Docker's wait response as the installer
+        // lifecycle boundary while continuing to drain output until that
+        // definitive exit arrives.
+        let wait_result = loop {
+            tokio::select! {
+                item = output.next(), if !output_closed => {
+                    match item {
+                        Some(item) => {
+                            let bytes = item.context("read installer output")?.into_bytes();
+                            persist_installer_output(
+                                &mut log_file,
+                                &mut log_file_bytes,
+                                &mut log_tail,
+                                &bytes,
+                                INSTALLER_LOG_TAIL_BYTES,
+                            ).await?;
+                        }
+                        None => output_closed = true,
+                    }
+                }
+                result = wait_stream.next() => {
+                    break result.context("installer wait stream ended unexpectedly")?;
+                }
+            }
+        };
+
         let (status_code, wait_error) =
             installer_exit_status(wait_result).context("wait for installer container")?;
+
+        // Docker can publish the exit event just before the final attach frames.
+        // Give those frames a bounded chance to reach the persistent log, but
+        // never confuse an open log stream with a still-running installer.
+        if !output_closed {
+            let drain = async {
+                while let Some(item) = output.next().await {
+                    let bytes = item.context("read installer output")?.into_bytes();
+                    persist_installer_output(
+                        &mut log_file,
+                        &mut log_file_bytes,
+                        &mut log_tail,
+                        &bytes,
+                        INSTALLER_LOG_TAIL_BYTES,
+                    )
+                    .await?;
+                }
+                Result::<()>::Ok(())
+            };
+            match tokio::time::timeout(INSTALLER_LOG_DRAIN_TIMEOUT, drain).await {
+                Ok(result) => result?,
+                Err(_) => tracing::warn!(
+                    container = %name,
+                    "timed out draining final installer log frames after container exit"
+                ),
+            }
+        }
 
         log_file.flush().await?;
         if status_code != 0 {
@@ -239,6 +311,30 @@ impl DockerManager {
             );
         }
     }
+}
+
+fn provisioned_payload_disk_limit_exceeded(
+    usage: i64,
+    limit: i64,
+) -> Option<ProvisionedPayloadDiskLimitExceeded> {
+    (limit > 0 && usage > limit).then_some(ProvisionedPayloadDiskLimitExceeded { usage, limit })
+}
+
+async fn persist_installer_output(
+    log_file: &mut fs::File,
+    log_file_bytes: &mut usize,
+    log_tail: &mut Vec<u8>,
+    bytes: &[u8],
+    tail_capacity: usize,
+) -> Result<()> {
+    let remaining = INSTALLER_LOG_FILE_LIMIT.saturating_sub(*log_file_bytes);
+    let persisted = bytes.len().min(remaining);
+    if persisted > 0 {
+        log_file.write_all(&bytes[..persisted]).await?;
+        *log_file_bytes += persisted;
+    }
+    append_tail(log_tail, bytes, tail_capacity);
+    Ok(())
 }
 
 async fn installer_postcondition(
@@ -330,6 +426,19 @@ pub(in crate::docker) fn installer_exit_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_payload_check_is_disabled_only_for_unlimited_servers() {
+        assert_eq!(provisioned_payload_disk_limit_exceeded(1_024, 0), None);
+        assert_eq!(provisioned_payload_disk_limit_exceeded(1_024, 1_024), None);
+        assert_eq!(
+            provisioned_payload_disk_limit_exceeded(1_025, 1_024),
+            Some(ProvisionedPayloadDiskLimitExceeded {
+                usage: 1_025,
+                limit: 1_024,
+            })
+        );
+    }
 
     #[tokio::test]
     async fn missing_startup_target_retries_once_before_failing() {

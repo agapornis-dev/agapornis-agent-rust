@@ -129,6 +129,17 @@ impl DockerManager {
         validate_startup(&host, &spec.startup_command).await?;
 
         report(
+            "validating-storage",
+            70,
+            "Checking the completed server files against the disk allocation",
+        );
+        // Only the completed bind-mount payload is charged to the server. The
+        // installer image, container root filesystem, and temporary files that
+        // the install script removed before exit are deliberately excluded.
+        self.ensure_provisioned_payload_disk_limit(&host, effective_disk)
+            .await?;
+
+        report(
             "pulling-runtime-image",
             72,
             "Pulling the selected runtime image",

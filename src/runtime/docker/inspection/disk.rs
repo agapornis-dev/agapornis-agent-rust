@@ -78,15 +78,7 @@ impl DockerManager {
 
         let limit = self.disk_limit(id).await?;
         let path = self.root(id).await?.0;
-        let disk_permit = self
-            .disk_scans
-            .acquire()
-            .await
-            .context("disk scanner is unavailable")?;
-        let usage = tokio::task::spawn_blocking(move || dir_size(&path))
-            .await
-            .unwrap_or(0);
-        drop(disk_permit);
+        let usage = self.measure_directory_usage(path).await?;
 
         let mut cache = self.disk_cache.lock().await;
         if cache.get(id).is_some_and(|state| {
@@ -97,6 +89,22 @@ impl DockerManager {
         calculation_guard.complete();
         calculation_notify.notify_waiters();
         Ok((usage, limit))
+    }
+
+    /// Measure a managed directory through the same single-flight scanner used
+    /// by runtime disk enforcement. Provisioning calls this directly after the
+    /// bind-mount payload is finalized but before the server container exists.
+    pub(in crate::docker) async fn measure_directory_usage(&self, path: PathBuf) -> Result<i64> {
+        let disk_permit = self
+            .disk_scans
+            .acquire()
+            .await
+            .context("disk scanner is unavailable")?;
+        let usage = tokio::task::spawn_blocking(move || dir_size(&path))
+            .await
+            .context("disk scanner task failed")?;
+        drop(disk_permit);
+        Ok(usage)
     }
 
     async fn begin_disk_calculation(
