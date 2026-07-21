@@ -174,17 +174,17 @@ impl proto::server_management_server::ServerManagement for ServerService {
         Ok(Response::new(action(
             self.0
                 .docker
-                .update_resources(
-                    &r.server_id,
-                    r.memory_bytes,
-                    r.cpu_limit_percentage,
-                    r.cpu_cores,
-                    r.disk_limit_bytes,
-                    r.cpu_pinning,
-                    &r.cpu_pinned_threads,
-                    r.swap_memory_bytes,
-                    &r.swap_memory_storage,
-                )
+                .update_resources(ResourceUpdateSpec {
+                    server_id: r.server_id,
+                    memory_bytes: r.memory_bytes,
+                    cpu_limit_percentage: r.cpu_limit_percentage,
+                    cpu_cores: r.cpu_cores,
+                    disk_limit_bytes: r.disk_limit_bytes,
+                    cpu_pinning: r.cpu_pinning,
+                    cpu_pinned_threads: r.cpu_pinned_threads,
+                    swap_memory_bytes: r.swap_memory_bytes,
+                    swap_memory_storage: r.swap_memory_storage,
+                })
                 .await,
         )))
     }
@@ -370,7 +370,7 @@ impl proto::server_management_server::ServerManagement for ServerService {
                 // be queued in the receiver; discard them by sequence instead
                 // of replaying the Docker tail twice.
                 Ok(entry) if entry.sequence > replayed_through => Some(Ok(ConsoleMessage {
-                    log_line: entry.line,
+                    log_line: entry.line.to_string(),
                     replayed: Some(false),
                     history_complete: None,
                 })),

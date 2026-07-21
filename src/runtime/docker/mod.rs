@@ -92,6 +92,19 @@ pub struct CreateSpec {
     pub port_mappings: Vec<(String, i32)>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ResourceUpdateSpec {
+    pub server_id: String,
+    pub memory_bytes: i64,
+    pub cpu_limit_percentage: i32,
+    pub cpu_cores: f64,
+    pub disk_limit_bytes: i64,
+    pub cpu_pinning: bool,
+    pub cpu_pinned_threads: String,
+    pub swap_memory_bytes: i64,
+    pub swap_memory_storage: String,
+}
+
 pub struct DatabaseConnectionSpec<'a> {
     pub server_id: &'a str,
     pub database_type: &'a str,

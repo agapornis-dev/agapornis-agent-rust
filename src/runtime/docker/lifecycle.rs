@@ -228,24 +228,18 @@ impl DockerManager {
         self.protection.remove(id);
     }
 
-    pub async fn update_resources(
-        &self,
-        id: &str,
-        memory: i64,
-        percent: i32,
-        cores: f64,
-        disk: i64,
-        cpu_pinning: bool,
-        cpu_pinned_threads: &str,
-        swap_memory_bytes: i64,
-        swap_memory_storage: &str,
-    ) -> Result<()> {
+    pub async fn update_resources(&self, spec: ResourceUpdateSpec) -> Result<()> {
+        let id = spec.server_id.as_str();
         paths::validate_id(id)?;
 
-        let cpus = effective_cpus(percent, cores);
-        let cpuset_cpus = Some(if cpu_pinning { pinned_cpu_set(cpu_pinned_threads)?.unwrap_or_default() } else { String::new() });
+        let cpus = effective_cpus(spec.cpu_limit_percentage, spec.cpu_cores);
+        let cpuset_cpus = Some(if spec.cpu_pinning {
+            pinned_cpu_set(&spec.cpu_pinned_threads)?.unwrap_or_default()
+        } else {
+            String::new()
+        });
 
-        let memory = (memory > 0).then_some(memory);
+        let memory = (spec.memory_bytes > 0).then_some(spec.memory_bytes);
 
         let nano_cpus = if cpus > 0.0 {
             if !cpus.is_finite() {
@@ -266,7 +260,8 @@ impl DockerManager {
         if memory.is_some() || nano_cpus.is_some() {
             let update = ContainerUpdateBody {
                 memory,
-                memory_swap: memory.map(|value| value.saturating_add(swap_memory_bytes.max(0))),
+                memory_swap: memory
+                    .map(|value| value.saturating_add(spec.swap_memory_bytes.max(0))),
                 cpuset_cpus,
 
                 // Docker represents --cpus in billionths of one CPU.
@@ -308,7 +303,11 @@ impl DockerManager {
             }
         }
 
-        let disk = effective_disk_limit(disk, swap_memory_bytes, swap_memory_storage)?;
+        let disk = effective_disk_limit(
+            spec.disk_limit_bytes,
+            spec.swap_memory_bytes,
+            &spec.swap_memory_storage,
+        )?;
         if disk > 0 {
             let path = paths::disk_limit_path(id)?;
 

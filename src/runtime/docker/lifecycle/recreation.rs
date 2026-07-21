@@ -7,6 +7,9 @@ use bollard::{
     },
 };
 
+type DockerPortBindings = HashMap<String, Option<Vec<PortBinding>>>;
+type ValidatedPortBindings = (Vec<String>, DockerPortBindings);
+
 impl DockerManager {
     pub async fn update_configuration(
         &self,
@@ -144,7 +147,7 @@ impl DockerManager {
     async fn ensure_requested_ports_available(
         &self,
         current_host_ports: &HashSet<u16>,
-        requested: &HashMap<String, Option<Vec<PortBinding>>>,
+        requested: &DockerPortBindings,
     ) -> Result<()> {
         let reserved = self.reserved_ports.lock().await;
         for bindings in requested.values().flatten() {
@@ -297,7 +300,7 @@ fn merged_environment(current: Option<&[String]>, desired: Vec<String>) -> Vec<S
         .collect()
 }
 
-fn bound_host_ports(bindings: Option<&HashMap<String, Option<Vec<PortBinding>>>>) -> HashSet<u16> {
+fn bound_host_ports(bindings: Option<&DockerPortBindings>) -> HashSet<u16> {
     bindings
         .into_iter()
         .flat_map(HashMap::values)
@@ -307,9 +310,7 @@ fn bound_host_ports(bindings: Option<&HashMap<String, Option<Vec<PortBinding>>>>
         .collect()
 }
 
-fn validated_port_bindings(
-    mappings: Vec<(String, i32)>,
-) -> Result<(Vec<String>, HashMap<String, Option<Vec<PortBinding>>>)> {
+fn validated_port_bindings(mappings: Vec<(String, i32)>) -> Result<ValidatedPortBindings> {
     if mappings.is_empty() || mappings.len() > 32 {
         bail!("a server must have between 1 and 32 port mappings");
     }

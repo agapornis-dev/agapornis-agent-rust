@@ -4,7 +4,7 @@ use crate::{
     backup::{BackupInfo, Backups},
     certificate::CertificateManager,
     config::DaemonConfig,
-    docker::{CreateSpec, DatabaseConnectionSpec, DockerManager},
+    docker::{CreateSpec, DatabaseConnectionSpec, DockerManager, ResourceUpdateSpec},
     file_service::{Files, ReadSource},
     node,
     protection::{LineDecision, ProtectionState},

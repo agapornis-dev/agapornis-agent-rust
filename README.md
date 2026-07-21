@@ -88,6 +88,9 @@ See `.env.example`. Important settings include:
 - `AGAPORNIS_BACKUP_CONCURRENCY` (default `1`; keep at `1` for the lowest CPU usage)
 - `AGAPORNIS_PROTECTION_SCAN_SECONDS` (default `10`)
 - `AGAPORNIS_DISK_CHECK_SECONDS` (default `150`)
+- `AGAPORNIS_CONSOLE_READER_IDLE_SECONDS` (default `120`; warm-reader grace after the last viewer leaves)
+- `AGAPORNIS_CONSOLE_MAX_ACTIVE_READERS` (default `256`, hard maximum `4096`)
+- `AGAPORNIS_CONSOLE_HISTORY_TOTAL_BYTES` (default `67108864`, hard maximum `1 GiB`)
 - `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_PREFIX`, `S3_FORCE_PATH_STYLE`
 - `AGAPORNIS_CROWDSEC_ENABLED`, `AGAPORNIS_CROWDSEC_CLI_PATH`, `AGAPORNIS_CROWDSEC_MAX_ALERTS`
 
