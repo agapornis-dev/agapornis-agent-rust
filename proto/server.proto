@@ -77,7 +77,7 @@ message CreateServerProgress {
   int32 assigned_host_port = 6;
   string error_message = 7;
 }
-message ServerActionRequest { string server_id = 1; }
+message ServerActionRequest { string server_id = 1; bool force = 2; }
 message ServerActionResponse {
   bool success = 1;
   string error_message = 2;

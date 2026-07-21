@@ -116,9 +116,13 @@ impl proto::server_management_server::ServerManagement for ServerService {
         &self,
         r: Request<ServerActionRequest>,
     ) -> Result<Response<ServerActionResponse>, Status> {
-        Ok(Response::new(action(
-            self.0.docker.stop(&r.into_inner().server_id).await,
-        )))
+        let request = r.into_inner();
+        let result = if request.force {
+            self.0.docker.kill(&request.server_id).await
+        } else {
+            self.0.docker.stop(&request.server_id).await
+        };
+        Ok(Response::new(action(result)))
     }
     async fn restart_server(
         &self,

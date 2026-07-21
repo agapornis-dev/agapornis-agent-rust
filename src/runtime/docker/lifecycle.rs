@@ -69,7 +69,7 @@ impl DockerManager {
 
         let inspect = self.inspect(id).await?;
         if inspect.pointer("/State/Running").and_then(Value::as_bool) != Some(true) {
-            self.detach_console(id).await;
+            self.clear_stopped_runtime_state(id).await;
             return Ok(());
         }
 
@@ -103,16 +103,38 @@ impl DockerManager {
         }
 
         if !stop_command.is_empty() && self.wait_until_stopped(id, Duration::from_secs(10)).await? {
-            self.detach_console(id).await;
-            self.startup_ready.lock().await.remove(id);
-            self.startup_checks.lock().await.remove(id);
+            self.clear_stopped_runtime_state(id).await;
             return Ok(());
         }
 
         self.force_graceful_stop(id).await?;
-        self.detach_console(id).await;
-        self.startup_ready.lock().await.remove(id);
-        self.startup_checks.lock().await.remove(id);
+        self.clear_stopped_runtime_state(id).await;
+        Ok(())
+    }
+
+    /// Stop immediately without sending the configured shutdown command or
+    /// waiting for the workload's grace period.
+    pub async fn kill(&self, id: &str) -> Result<()> {
+        paths::validate_id(id)?;
+
+        let inspect = self.inspect(id).await?;
+        if inspect.pointer("/State/Running").and_then(Value::as_bool) != Some(true) {
+            self.clear_stopped_runtime_state(id).await;
+            return Ok(());
+        }
+
+        self.apply_manual_restart_policy(id).await?;
+        let options = KillContainerOptionsBuilder::default()
+            .signal("SIGKILL")
+            .build();
+        match self.docker.kill_container(id, Some(options)).await {
+            Ok(()) => {}
+            Err(error) if docker_status(&error) == Some(409) => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("force kill Docker container {id}"));
+            }
+        }
+        self.clear_stopped_runtime_state(id).await;
         Ok(())
     }
 
@@ -388,6 +410,12 @@ impl DockerManager {
             Err(err) if docker_status(&err) == Some(304) => Ok(()),
             Err(err) => Err(err).with_context(|| format!("stop Docker container {id}")),
         }
+    }
+
+    async fn clear_stopped_runtime_state(&self, id: &str) {
+        self.detach_console(id).await;
+        self.startup_ready.lock().await.remove(id);
+        self.startup_checks.lock().await.remove(id);
     }
 
     async fn wait_until_stopped(&self, id: &str, timeout: Duration) -> Result<bool> {
