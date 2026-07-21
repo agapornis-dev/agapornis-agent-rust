@@ -19,7 +19,29 @@ use xml::apply_xml_parser;
 
 const MAX_CONFIG_FILE_SIZE: u64 = 8 * 1024 * 1024;
 const STARTUP_TARGET_CHECK_ATTEMPTS: usize = 10;
+#[cfg(not(test))]
 const STARTUP_TARGET_CHECK_INTERVAL: Duration = Duration::from_millis(200);
+#[cfg(test)]
+const STARTUP_TARGET_CHECK_INTERVAL: Duration = Duration::from_millis(10);
+
+#[derive(Debug)]
+pub(super) struct MissingStartupTarget {
+    pub(super) target: PathBuf,
+    pub(super) resolved: PathBuf,
+}
+
+impl std::fmt::Display for MissingStartupTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Startup target '{}' was not found at '{}'.",
+            self.target.display(),
+            self.resolved.display()
+        )
+    }
+}
+
+impl std::error::Error for MissingStartupTarget {}
 
 impl DockerManager {
     pub(super) async fn ensure_network(&self, name: &str) -> Result<()> {
@@ -81,7 +103,9 @@ pub(super) fn pinned_cpu_set(value: &str) -> Result<Option<String>> {
     if value.is_empty() {
         return Ok(None);
     }
-    let available = std::thread::available_parallelism().map(usize::from).unwrap_or(1);
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
     let mut selected = HashSet::new();
     for segment in value.split(',') {
         let (start, end) = match segment.split_once('-') {
@@ -91,10 +115,19 @@ pub(super) fn pinned_cpu_set(value: &str) -> Result<Option<String>> {
                 (thread, thread)
             }
         };
-        if end < start { bail!("invalid pinned CPU thread range '{segment}'"); }
-        if end >= available { bail!("pinned CPU thread {end} does not exist; this node has threads 0-{}", available - 1); }
+        if end < start {
+            bail!("invalid pinned CPU thread range '{segment}'");
+        }
+        if end >= available {
+            bail!(
+                "pinned CPU thread {end} does not exist; this node has threads 0-{}",
+                available - 1
+            );
+        }
         for thread in start..=end {
-            if !selected.insert(thread) { bail!("pinned CPU thread {thread} is listed more than once"); }
+            if !selected.insert(thread) {
+                bail!("pinned CPU thread {thread} is listed more than once");
+            }
         }
     }
     if selected.is_empty() {
@@ -104,9 +137,13 @@ pub(super) fn pinned_cpu_set(value: &str) -> Result<Option<String>> {
 }
 
 pub(super) fn effective_disk_limit(disk: i64, swap: i64, storage: &str) -> Result<i64> {
-    if swap < 0 { bail!("swap memory cannot be negative"); }
+    if swap < 0 {
+        bail!("swap memory cannot be negative");
+    }
     if storage == "server" && swap > 0 {
-        if disk <= swap { bail!("server storage must be larger than swap memory"); }
+        if disk <= swap {
+            bail!("server storage must be larger than swap memory");
+        }
         Ok(disk - swap)
     } else {
         Ok(disk)
@@ -114,14 +151,25 @@ pub(super) fn effective_disk_limit(disk: i64, swap: i64, storage: &str) -> Resul
 }
 
 pub(super) async fn validate_startup(root: &Path, command: &str) -> Result<()> {
+    if let Some(missing) = missing_startup_target(root, command).await? {
+        return Err(missing.into());
+    }
+
+    Ok(())
+}
+
+pub(super) async fn missing_startup_target(
+    root: &Path,
+    command: &str,
+) -> Result<Option<MissingStartupTarget>> {
     let Some(target) = startup_target(command) else {
-        return Ok(());
+        return Ok(None);
     };
     let resolved = root.join(&target);
 
     for attempt in 1..=STARTUP_TARGET_CHECK_ATTEMPTS {
         match fs::metadata(&resolved).await {
-            Ok(metadata) if metadata.is_file() => return Ok(()),
+            Ok(metadata) if metadata.is_file() => return Ok(None),
             Ok(_) => {
                 bail!(
                     "Startup target '{}' exists at '{}', but is not a regular file.",
@@ -136,11 +184,7 @@ pub(super) async fn validate_startup(root: &Path, command: &str) -> Result<()> {
                 tokio::time::sleep(STARTUP_TARGET_CHECK_INTERVAL).await;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                bail!(
-                    "Startup target '{}' was not found at '{}' after the install script completed.",
-                    target.display(),
-                    resolved.display()
-                );
+                return Ok(Some(MissingStartupTarget { target, resolved }));
             }
             Err(error) => {
                 return Err(error).with_context(|| {

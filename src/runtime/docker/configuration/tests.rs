@@ -9,7 +9,8 @@ fn replacements(value: Value) -> Map<String, Value> {
 async fn startup_validation_waits_for_a_delayed_installer_target() {
     let root = std::env::temp_dir().join(format!("agapornis-startup-test-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).await.unwrap();
-    let executable = root.join("SonsOfTheForestDS.exe");
+    fs::create_dir_all(root.join("bin")).await.unwrap();
+    let executable = root.join("bin/dedicated-server");
     let delayed_executable = executable.clone();
 
     let writer = tokio::spawn(async move {
@@ -19,7 +20,7 @@ async fn startup_validation_waits_for_a_delayed_installer_target() {
             .unwrap();
     });
 
-    validate_startup(&root, "wine ./SonsOfTheForestDS.exe")
+    validate_startup(&root, "compat-runtime ./bin/dedicated-server --port 25565")
         .await
         .unwrap();
     writer.await.unwrap();

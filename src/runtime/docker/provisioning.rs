@@ -82,7 +82,11 @@ impl DockerManager {
         let host = paths::server_dir(&spec.server_id)?;
         fs::create_dir_all(&host).await?;
 
-        let effective_disk = effective_disk_limit(spec.disk_limit_bytes, spec.swap_memory_bytes, &spec.swap_memory_storage)?;
+        let effective_disk = effective_disk_limit(
+            spec.disk_limit_bytes,
+            spec.swap_memory_bytes,
+            &spec.swap_memory_storage,
+        )?;
         if effective_disk > 0 {
             let metadata = paths::disk_limit_path(&spec.server_id)?;
 

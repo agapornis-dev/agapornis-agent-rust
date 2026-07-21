@@ -14,6 +14,14 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 const INSTALLER_LOG_FILE_LIMIT: usize = 8 * 1024 * 1024;
+const INSTALLER_ATTEMPTS: usize = 2;
+const INSTALLER_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+enum InstallerPostcondition {
+    Ready,
+    Retry(MissingStartupTarget),
+    Failed(MissingStartupTarget),
+}
 
 impl DockerManager {
     pub(super) async fn run_installer(
@@ -34,7 +42,6 @@ impl DockerManager {
             30,
             "Setting up the Docker installer container",
         );
-        let name = format!("{}-install-{}", spec.server_id, Uuid::new_v4().simple());
         let script_path =
             std::env::temp_dir().join(format!("agapornis-install-{}.sh", Uuid::new_v4()));
 
@@ -55,14 +62,65 @@ impl DockerManager {
         let mut environment = vec!["SERVER_DIR=/mnt/server".into()];
         environment.extend(spec.env.iter().cloned());
 
-        let config = installer_container(spec, command, environment, host_source, script_source);
-        let create_options = CreateContainerOptionsBuilder::default().name(&name).build();
+        let result = async {
+            for attempt in 1..=INSTALLER_ATTEMPTS {
+                let name = format!("{}-install-{}", spec.server_id, Uuid::new_v4().simple());
+                let config = installer_container(
+                    spec,
+                    command.clone(),
+                    environment.clone(),
+                    host_source.clone(),
+                    script_source.clone(),
+                );
+                let create_options = CreateContainerOptionsBuilder::default().name(&name).build();
 
-        let result = self
-            .execute_installer(&name, host, create_options, config, report)
-            .await;
+                let attempt_result = self
+                    .execute_installer(&name, host, create_options, config, report, attempt)
+                    .await;
+                self.cleanup_installer_container(&name).await;
+                attempt_result?;
 
-        self.cleanup_installer(&name, &script_path).await;
+                let missing =
+                    match installer_postcondition(host, &spec.startup_command, attempt).await? {
+                        InstallerPostcondition::Ready => {
+                            report(
+                                "finishing-installer",
+                                58,
+                                "Finalizing installed files and removing the installer container",
+                            );
+                            return Ok(());
+                        }
+                        InstallerPostcondition::Retry(missing) => missing,
+                        InstallerPostcondition::Failed(missing) => {
+                            bail!(
+                                "Installer completed {INSTALLER_ATTEMPTS} attempts, but startup \
+                                 target '{}' is still missing at '{}'. Check \
+                                 .agapornis-install.log in the server root for the installer error.",
+                                missing.target.display(),
+                                missing.resolved.display()
+                            );
+                        }
+                    };
+
+                tracing::warn!(
+                    attempt,
+                    startup_target = %missing.target.display(),
+                    resolved_path = %missing.resolved.display(),
+                    "installer exited successfully without creating the startup target; retrying"
+                );
+                let message = format!(
+                    "Installer did not create startup target '{}'; retrying once",
+                    missing.target.display()
+                );
+                report("retrying-installer", 52, &message);
+                tokio::time::sleep(INSTALLER_RETRY_DELAY).await;
+            }
+
+            unreachable!("installer attempt loop always returns")
+        }
+        .await;
+
+        self.cleanup_installer_script(&script_path).await;
         result
     }
 
@@ -73,6 +131,7 @@ impl DockerManager {
         create_options: bollard::query_parameters::CreateContainerOptions,
         config: ContainerCreateBody,
         report: &ProvisioningReporter,
+        attempt: usize,
     ) -> Result<()> {
         self.docker
             .create_container(Some(create_options), config)
@@ -101,11 +160,19 @@ impl DockerManager {
             .await
             .context("start installer container")?;
 
-        report(
-            "installing-server",
-            40,
-            "Installing required packages and server files",
-        );
+        if attempt == 1 {
+            report(
+                "installing-server",
+                40,
+                "Installing required packages and server files",
+            );
+        } else {
+            report(
+                "retrying-installer",
+                54,
+                "Retrying the installer to recover the missing startup target",
+            );
+        }
         const INSTALLER_LOG_TAIL_BYTES: usize = 64 * 1024;
         let mut log_file = fs::File::create(host.join(".agapornis-install.log")).await?;
         let mut log_file_bytes = 0usize;
@@ -145,15 +212,10 @@ impl DockerManager {
             bail!("installer container exited with status {status_code}: {detail}");
         }
 
-        report(
-            "finishing-installer",
-            58,
-            "Finalizing installed files and removing the installer container",
-        );
         Ok(())
     }
 
-    async fn cleanup_installer(&self, name: &str, script_path: &Path) {
+    async fn cleanup_installer_container(&self, name: &str) {
         let remove_options = RemoveContainerOptionsBuilder::default()
             .force(true)
             .v(true)
@@ -165,7 +227,9 @@ impl DockerManager {
         {
             tracing::warn!(container = %name, "failed to remove installer container: {error}");
         }
+    }
 
+    async fn cleanup_installer_script(&self, script_path: &Path) {
         if let Err(error) = fs::remove_file(script_path).await
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -174,6 +238,22 @@ impl DockerManager {
                 "failed to remove installer script: {error}"
             );
         }
+    }
+}
+
+async fn installer_postcondition(
+    host: &Path,
+    startup_command: &str,
+    attempt: usize,
+) -> Result<InstallerPostcondition> {
+    let Some(missing) = missing_startup_target(host, startup_command).await? else {
+        return Ok(InstallerPostcondition::Ready);
+    };
+
+    if attempt < INSTALLER_ATTEMPTS {
+        Ok(InstallerPostcondition::Retry(missing))
+    } else {
+        Ok(InstallerPostcondition::Failed(missing))
     }
 }
 
@@ -244,5 +324,37 @@ pub(in crate::docker) fn installer_exit_status(
             Ok((code, (!error.trim().is_empty()).then_some(error)))
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_startup_target_retries_once_before_failing() {
+        let root =
+            std::env::temp_dir().join(format!("agapornis-installer-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("bin")).await.unwrap();
+
+        let first = installer_postcondition(&root, "compat-runtime ./bin/dedicated-server", 1)
+            .await
+            .unwrap();
+        assert!(matches!(first, InstallerPostcondition::Retry(_)));
+
+        let exhausted = installer_postcondition(&root, "compat-runtime ./bin/missing-server", 2)
+            .await
+            .unwrap();
+        assert!(matches!(exhausted, InstallerPostcondition::Failed(_)));
+
+        fs::write(root.join("bin/dedicated-server"), b"server")
+            .await
+            .unwrap();
+        let second = installer_postcondition(&root, "compat-runtime ./bin/dedicated-server", 2)
+            .await
+            .unwrap();
+        assert!(matches!(second, InstallerPostcondition::Ready));
+
+        fs::remove_dir_all(root).await.unwrap();
     }
 }

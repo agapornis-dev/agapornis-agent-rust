@@ -22,7 +22,10 @@ pub(super) fn build_container(
     let ports = server_ports(spec, host_port)?;
     let cpus = effective_cpus(spec.cpu_limit_percentage, spec.cpu_cores);
     let cpuset_cpus = pinned_cpu_set(&spec.cpu_pinned_threads)?;
-    let memory_swap = (spec.memory_bytes > 0).then_some(spec.memory_bytes.saturating_add(spec.swap_memory_bytes.max(0)));
+    let memory_swap = (spec.memory_bytes > 0).then_some(
+        spec.memory_bytes
+            .saturating_add(spec.swap_memory_bytes.max(0)),
+    );
 
     let healthcheck = database_health_command(&spec.env).map(|command| HealthConfig {
         test: Some(vec!["CMD-SHELL".into(), command]),
@@ -120,13 +123,28 @@ fn server_labels(spec: &CreateSpec, network: &str, data_path: &str) -> HashMap<S
         ("agapornis.server_id".into(), spec.server_id.clone()),
         (
             "agapornis.disk_limit_bytes".into(),
-            effective_disk_limit(spec.disk_limit_bytes, spec.swap_memory_bytes, &spec.swap_memory_storage).unwrap_or(spec.disk_limit_bytes).to_string(),
+            effective_disk_limit(
+                spec.disk_limit_bytes,
+                spec.swap_memory_bytes,
+                &spec.swap_memory_storage,
+            )
+            .unwrap_or(spec.disk_limit_bytes)
+            .to_string(),
         ),
         ("agapornis.cpu_cores".into(), spec.cpu_cores.to_string()),
         ("agapornis.cpu_pinning".into(), spec.cpu_pinning.to_string()),
-        ("agapornis.cpu_pinned_threads".into(), spec.cpu_pinned_threads.clone()),
-        ("agapornis.swap_memory_bytes".into(), spec.swap_memory_bytes.to_string()),
-        ("agapornis.swap_memory_storage".into(), spec.swap_memory_storage.clone()),
+        (
+            "agapornis.cpu_pinned_threads".into(),
+            spec.cpu_pinned_threads.clone(),
+        ),
+        (
+            "agapornis.swap_memory_bytes".into(),
+            spec.swap_memory_bytes.to_string(),
+        ),
+        (
+            "agapornis.swap_memory_storage".into(),
+            spec.swap_memory_storage.clone(),
+        ),
         (
             "agapornis.cpu_limit_percentage".into(),
             spec.cpu_limit_percentage.to_string(),

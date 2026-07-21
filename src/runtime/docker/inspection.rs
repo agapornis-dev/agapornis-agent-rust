@@ -154,7 +154,10 @@ impl DockerManager {
          * cgroups v2 generally exposes `inactive_file`.
          */
         let mut resources = resource_metrics(&stat);
-        let nano_cpus = inspect.pointer("/HostConfig/NanoCpus").and_then(Value::as_i64).unwrap_or(0);
+        let nano_cpus = inspect
+            .pointer("/HostConfig/NanoCpus")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         resources.cpu_percent = normalized_cpu_percent(resources.cpu_percent, nano_cpus);
 
         Ok(Metrics {
