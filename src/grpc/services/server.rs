@@ -465,6 +465,22 @@ impl proto::server_management_server::ServerManagement for ServerService {
             },
         }))
     }
+    async fn preview_linux_updates(
+        &self,
+        _: Request<LinuxUpdateRequest>,
+    ) -> Result<Response<LinuxUpdateResponse>, Status> {
+        Ok(Response::new(linux_update_response(
+            self.0.linux_updates.preview().await,
+        )))
+    }
+    async fn apply_linux_updates(
+        &self,
+        _: Request<LinuxUpdateRequest>,
+    ) -> Result<Response<LinuxUpdateResponse>, Status> {
+        Ok(Response::new(linux_update_response(
+            self.0.linux_updates.apply().await,
+        )))
+    }
     async fn install_certificate(
         &self,
         r: Request<InstallCertificateRequest>,
@@ -511,6 +527,36 @@ impl proto::server_management_server::ServerManagement for ServerService {
                 error_message: e.to_string(),
             },
         }))
+    }
+}
+
+fn linux_update_response(
+    result: anyhow::Result<crate::node::LinuxUpdateResult>,
+) -> LinuxUpdateResponse {
+    match result {
+        Ok(result) => LinuxUpdateResponse {
+            success: true,
+            message: result.message,
+            packages: result
+                .packages
+                .into_iter()
+                .map(|package| PackageUpgrade {
+                    name: package.name,
+                    current_version: package.current,
+                    candidate_version: package.candidate,
+                })
+                .collect(),
+            reboot_required: result.reboot_required,
+            distribution: result.distribution,
+            manager: result.manager.into(),
+            preview_command: result.preview_command.into(),
+            apply_command: result.apply_command.into(),
+        },
+        Err(error) => LinuxUpdateResponse {
+            success: false,
+            message: error.to_string(),
+            ..Default::default()
+        },
     }
 }
 

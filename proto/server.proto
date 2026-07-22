@@ -22,6 +22,8 @@ service ServerManagement {
   rpc GetUpdateStatus (UpdateStatusRequest) returns (UpdateStatusResponse);
   rpc ApplyUpdate (ApplyUpdateRequest) returns (ApplyUpdateResponse);
   rpc RestartForUpdate (RestartForUpdateRequest) returns (RestartForUpdateResponse);
+  rpc PreviewLinuxUpdates (LinuxUpdateRequest) returns (LinuxUpdateResponse);
+  rpc ApplyLinuxUpdates (LinuxUpdateRequest) returns (LinuxUpdateResponse);
   rpc InstallCertificate (InstallCertificateRequest) returns (CertificateActionResponse);
   rpc RollbackCertificate (RollbackCertificateRequest) returns (CertificateActionResponse);
 }
@@ -116,6 +118,9 @@ message ApplyUpdateRequest { string artifact_url = 1; string sha256 = 2; }
 message ApplyUpdateResponse { bool success = 1; string message = 2; string staged_path = 3; bool restart_required = 4; }
 message RestartForUpdateRequest {}
 message RestartForUpdateResponse { bool success = 1; string message = 2; }
+message LinuxUpdateRequest {}
+message PackageUpgrade { string name = 1; string current_version = 2; string candidate_version = 3; }
+message LinuxUpdateResponse { bool success = 1; string message = 2; repeated PackageUpgrade packages = 3; bool reboot_required = 4; string distribution = 5; string manager = 6; string preview_command = 7; string apply_command = 8; }
 
 message UploadFileRequest { oneof data { UploadMetadata metadata = 1; bytes chunk_data = 2; } }
 message UploadMetadata { string server_id = 1; string target_path = 2; }

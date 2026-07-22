@@ -32,13 +32,11 @@ pub async fn stats() -> Result<NodeStats> {
         disk_used,
         disk_total,
         uptime: uptime_seconds().await,
-        cpus: std::thread::available_parallelism()
-            .map(|value| value.get() as i32)
-            .unwrap_or(1),
+        cpus: second.2.max(1),
     })
 }
 
-async fn cpu_sample() -> (u64, u64) {
+async fn cpu_sample() -> (u64, u64, i32) {
     let text = fs::read_to_string("/proc/stat").await.unwrap_or_default();
     let values: Vec<u64> = text
         .lines()
@@ -48,7 +46,15 @@ async fn cpu_sample() -> (u64, u64) {
         .skip(1)
         .filter_map(|value| value.parse().ok())
         .collect();
-    (values.get(3).copied().unwrap_or(0), values.iter().sum())
+    let cpus = text
+        .lines()
+        .filter(|line| line.as_bytes().get(3).is_some_and(u8::is_ascii_digit))
+        .count() as i32;
+    (
+        values.get(3).copied().unwrap_or(0),
+        values.iter().sum(),
+        cpus,
+    )
 }
 
 async fn memory_stats() -> (i64, i64) {

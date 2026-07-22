@@ -12,9 +12,12 @@ use tokio::fs;
 mod crowdsec;
 #[path = "node/linux.rs"]
 mod linux;
+#[path = "node/linux_packages.rs"]
+mod linux_packages;
 
 pub use crowdsec::crowdsec;
 pub use linux::stats;
+pub use linux_packages::{LinuxPackageUpdater, LinuxUpdateResult};
 
 pub struct NodeStats {
     pub cpu: f64,
