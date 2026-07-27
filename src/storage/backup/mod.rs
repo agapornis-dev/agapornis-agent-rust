@@ -25,7 +25,7 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::{
     fs,
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::{OwnedSemaphorePermit, Semaphore},
 };
 use uuid::Uuid;

@@ -230,23 +230,23 @@ impl proto::server_management_server::ServerManagement for ServerService {
         _: Request<NodeStatsRequest>,
     ) -> Result<Response<NodeStatsResponse>, Status> {
         let console_inventory_initialized = self.0.console.inventory_initialized().await;
-        Ok(Response::new(match node::stats().await {
-            Ok(s) => NodeStatsResponse {
-                cpu_percentage: s.cpu,
-                memory_usage_bytes: s.memory_used,
-                memory_total_bytes: s.memory_total,
-                disk_usage_bytes: s.disk_used,
-                disk_total_bytes: s.disk_total,
+        Ok(Response::new(match self.0.node_telemetry.snapshot() {
+            Ok(stats) => NodeStatsResponse {
+                cpu_percentage: stats.cpu,
+                memory_usage_bytes: stats.memory_used,
+                memory_total_bytes: stats.memory_total,
+                disk_usage_bytes: stats.disk_used,
+                disk_total_bytes: stats.disk_total,
                 status: "healthy".into(),
-                error_message: "".into(),
-                uptime_seconds: s.uptime,
-                cpu_count: s.cpus,
+                error_message: String::new(),
+                uptime_seconds: stats.uptime,
+                cpu_count: stats.cpus,
                 agent_instance_id: self.0.agent_instance_id.clone(),
                 console_inventory_initialized,
             },
-            Err(e) => NodeStatsResponse {
+            Err(error) => NodeStatsResponse {
                 status: "unhealthy".into(),
-                error_message: e.to_string(),
+                error_message: error.to_string(),
                 agent_instance_id: self.0.agent_instance_id.clone(),
                 console_inventory_initialized,
                 ..Default::default()

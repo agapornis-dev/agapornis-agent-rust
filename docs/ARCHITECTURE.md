@@ -72,7 +72,7 @@ The protobuf contract in `proto/server.proto` is the compatibility boundary with
 
 ## Background work
 
-`runtime/supervisor.rs` periodically observes containers, enforces disk limits, and forwards console output into `ConsoleHub`. Keep periodic work bounded: avoid a Docker scan per viewer or per gRPC stream.
+`runtime/supervisor.rs` periodically observes containers, enforces disk limits, and forwards console output into `ConsoleHub`. Host telemetry is sampled independently and cached, so `GetNodeStats` never waits for a CPU sampling window or filesystem-capacity query. Keep periodic work bounded: avoid a Docker scan per viewer or per gRPC stream.
 
 ## Adding behavior
 

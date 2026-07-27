@@ -74,7 +74,7 @@ Use `agapornis-agent-linux-aarch64` on an ARM64 host. Place the generated `confi
 
 - Docker Engine and the `docker` CLI
 - `tar`
-- `df`, `chown`, and `/proc` on Linux
+- `chown` and `/proc` on Linux
 - `cscli` only when optional CrowdSec telemetry is enabled. The default `cscli` value uses PATH lookup and then tries common Linux install paths such as `/usr/bin/cscli`, `/usr/local/bin/cscli`, and `/snap/bin/cscli`.
 
 ## Environment
@@ -86,6 +86,7 @@ See `.env.example`. Important settings include:
 - `AGAPORNIS_DOCKER_NETWORK`
 - `AGAPORNIS_BACKUP_ENCRYPTION_KEY` (base64-encoded 32-byte key)
 - `AGAPORNIS_BACKUP_CONCURRENCY` (default `1`; keep at `1` for the lowest CPU usage)
+- `AGAPORNIS_NODE_STATS_SAMPLE_SECONDS` (default `1`, hard maximum `60`; statistics are cached so health checks return immediately)
 - `AGAPORNIS_PROTECTION_SCAN_SECONDS` (default `10`)
 - `AGAPORNIS_DISK_CHECK_SECONDS` (default `150`)
 - `AGAPORNIS_CONSOLE_READER_IDLE_SECONDS` (default `120`; warm-reader grace after the last viewer leaves)

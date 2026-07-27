@@ -40,6 +40,7 @@ pub struct AppState {
     pub backups: Backups,
     pub update: UpdateManager,
     pub linux_updates: LinuxPackageUpdater,
+    pub node_telemetry: node::NodeTelemetry,
     pub certificates: CertificateManager,
     pub config: DaemonConfig,
     pub agent_instance_id: String,
@@ -54,12 +55,14 @@ impl AppState {
         let docker = Arc::new(DockerManager::connect_with_retry(protection.clone()).await);
 
         let console = Arc::new(ConsoleHub::new(docker.clone(), protection.clone()));
+        let node_telemetry = node::NodeTelemetry::start().await?;
 
         Ok(Self {
             files: Files::new(docker.clone()),
             backups: Backups::new().await,
             update: UpdateManager,
             linux_updates: LinuxPackageUpdater::default(),
+            node_telemetry,
             certificates,
             config,
             docker,

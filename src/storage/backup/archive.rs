@@ -249,11 +249,20 @@ pub(super) async fn validate_archive(path: &Path) -> Result<()> {
     Ok(())
 }
 pub(super) async fn sha256(path: &Path) -> Result<String> {
-    let mut f = fs::File::open(path).await?;
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || sha256_blocking(&path))
+        .await
+        .context("backup checksum worker failed")?
+}
+
+fn sha256_blocking(path: &Path) -> Result<String> {
+    use std::io::Read;
+
+    let mut f = std::fs::File::open(path)?;
     let mut h = Sha256::new();
     let mut b = vec![0; 1024 * 1024];
     loop {
-        let n = f.read(&mut b).await?;
+        let n = f.read(&mut b)?;
         if n == 0 {
             break;
         }
