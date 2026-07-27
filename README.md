@@ -124,7 +124,7 @@ The agent downloads over HTTPS, enforces the size limit, verifies SHA-256 before
 - If the service exits sooner, the next `ExecStartPre` restores the previous executable.
 - `--rollback-update` provides a manual rollback command while the activation is still pending health confirmation.
 
-Set `AGAPORNIS_UPDATE_AUTO_RESTART=true` when running under the supplied systemd unit so a successful staging RPC schedules service activation automatically.
+Staging never restarts the service. After the checksum-verified artifact is staged, use the admin panel's **Restart & apply** action (or the `RestartForUpdate` RPC) to schedule activation. This keeps the staging response connected and makes the disruptive step explicit.
 
 If a verified artifact remains staged, the admin update screen can request `RestartForUpdate`. The agent accepts that request only while the pending marker resolves to a regular file inside its own update staging directory and the configured systemd unit is loaded. This is intentionally not a general-purpose agent restart operation.
 
@@ -135,8 +135,8 @@ The unit also sets `AGAPORNIS_UPDATE_SYSTEMD_SERVICE=agapornis-agent.service`. `
 Update `Cargo.toml` and `Cargo.lock`, commit the change, and push a matching tag:
 
 ```bash
-git tag v0.2.0
-git push origin main v0.2.0
+git tag v1.0.0
+git push origin main v1.0.0
 ```
 
 `.github/workflows/release.yml` runs Clippy and tests, cross-compiles both Linux targets, publishes binary checksums, and generates `release-manifest.json`. The version reported by each binary is embedded at build time. The workflow rejects a tag that does not equal `v<Cargo package version>`.

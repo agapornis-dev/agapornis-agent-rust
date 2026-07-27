@@ -85,11 +85,26 @@ impl UpdateManager {
         let exe = std::env::current_exe()?;
         let dir = staging(&exe);
         fs::create_dir_all(&dir).await?;
-        let target = dir.join(format!(
-            "agapornis-agent-{}.pending",
-            chrono::Utc::now().format("%Y%m%d%H%M%S")
-        ));
-        let mut file = fs::File::create(&target).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).await?;
+        }
+        let marker = dir.join("pending-artifact");
+        if pending_update_at(&exe)?.is_some() {
+            bail!("a verified agent update is already staged")
+        }
+        if marker.exists() {
+            fs::remove_file(&marker)
+                .await
+                .context("remove empty pending agent update marker")?;
+        }
+        let target = dir.join(format!("agapornis-agent-{}.pending", uuid::Uuid::new_v4()));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .await?;
         let mut hash = Sha256::new();
         let mut size = 0u64;
         let mut stream = response.bytes_stream();
@@ -103,7 +118,11 @@ impl UpdateManager {
             hash.update(&chunk);
             file.write_all(&chunk).await?;
         }
-        file.flush().await?;
+        if size == 0 {
+            let _ = fs::remove_file(&target).await;
+            bail!("update artifact is empty")
+        }
+        file.sync_all().await?;
         let actual = hash.finalize();
         if !bool::from(actual.as_slice().ct_eq(&expected)) {
             let _ = fs::remove_file(&target).await;
@@ -114,14 +133,24 @@ impl UpdateManager {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).await?;
         }
-        fs::write(dir.join("pending-artifact"), target.display().to_string()).await?;
-        schedule_service_restart(false);
+        let marker_temp = dir.join(format!(".pending-artifact-{}.tmp", uuid::Uuid::new_v4()));
+        let mut marker_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker_temp)
+            .await?;
+        marker_file
+            .write_all(target.display().to_string().as_bytes())
+            .await?;
+        marker_file.sync_all().await?;
+        drop(marker_file);
+        if let Err(error) = fs::rename(&marker_temp, &marker).await {
+            let _ = fs::remove_file(&marker_temp).await;
+            let _ = fs::remove_file(&target).await;
+            return Err(error).context("commit pending agent update marker");
+        }
         Ok(UpdateResult {
-            message: if automatic_restart_enabled() {
-                "Update staged. The agent service restart has been scheduled.".into()
-            } else {
-                "Update staged. Restart the agent service to activate it.".into()
-            },
+            message: "Update staged. Restart the agent service to activate it.".into(),
             staged: target.display().to_string(),
             restart_required: true,
         })
@@ -135,8 +164,8 @@ impl UpdateManager {
         let exe = std::env::current_exe()?;
         let pending =
             pending_update_at(&exe)?.context("no verified agent update is staged for restart")?;
-        validate_systemd_service()?;
-        schedule_service_restart(true);
+        let service = validate_systemd_service()?;
+        schedule_service_restart(service);
         Ok(UpdateResult {
             message: "Agent restart scheduled. The staged update will be activated safely.".into(),
             staged: pending.display().to_string(),
@@ -270,15 +299,7 @@ fn activation_state_path(exe: &Path) -> PathBuf {
     staging(exe).join("activation-state.json")
 }
 
-fn automatic_restart_enabled() -> bool {
-    std::env::var("AGAPORNIS_UPDATE_AUTO_RESTART")
-        .is_ok_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
-}
-
-fn schedule_service_restart(force: bool) {
-    if !force && !automatic_restart_enabled() {
-        return;
-    }
+fn schedule_service_restart(service: String) {
     /*
      * The Linux systemd unit is the long-lived supervisor. The running
      * process cannot replace itself in memory, so staging writes the new
@@ -286,10 +307,10 @@ fn schedule_service_restart(force: bool) {
      * launch main activates the pending binary; systemd then continues to
      * provide restart policy, logging, and service lifetime management.
      */
-    let service = std::env::var("AGAPORNIS_UPDATE_SYSTEMD_SERVICE")
-        .unwrap_or_else(|_| "agapornis-agent.service".into());
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Leave enough time for the successful gRPC response to traverse the
+        // API and panel proxy before systemd terminates this process.
+        tokio::time::sleep(Duration::from_secs(5)).await;
         match tokio::process::Command::new("systemctl")
             .args(["--no-block", "restart", &service])
             .spawn()
@@ -305,7 +326,7 @@ fn schedule_service_restart(force: bool) {
     });
 }
 
-fn validate_systemd_service() -> Result<()> {
+fn validate_systemd_service() -> Result<String> {
     #[cfg(not(unix))]
     bail!("safe update restart is supported only by the systemd service");
 
@@ -328,7 +349,7 @@ fn validate_systemd_service() -> Result<()> {
         if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "loaded" {
             bail!("agent systemd service is not loaded; restart the staged update manually")
         }
-        Ok(())
+        Ok(service)
     }
 }
 

@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 jobs:
   verify:
@@ -21,6 +22,9 @@ jobs:
         run: |
           crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agapornis-agent") | .version')
           test "${GITHUB_REF_NAME}" = "v${crate_version}"
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Verify agent
         run: |
           cargo clippy --all-targets --locked

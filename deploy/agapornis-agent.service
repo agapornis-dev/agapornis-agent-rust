@@ -11,7 +11,6 @@ Type=simple
 User=root
 WorkingDirectory=/opt/agapornis/agent
 EnvironmentFile=-/etc/agapornis/agent.env
-Environment=AGAPORNIS_UPDATE_AUTO_RESTART=true
 Environment=AGAPORNIS_UPDATE_SYSTEMD_SERVICE=agapornis-agent.service
 ExecStartPre=/usr/local/bin/agapornis-agent --activate-pending-update
 ExecStart=/usr/local/bin/agapornis-agent

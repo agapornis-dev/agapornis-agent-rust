@@ -311,10 +311,7 @@ fn parse_apk(output: &str) -> Vec<PackageUpgrade> {
                 .1;
             let (name, versions) = rest.split_once(" (")?;
             let versions = versions.trim_end_matches(')');
-            let (current, candidate) = versions
-                .split_once(" -> ")
-                .map(|(old, new)| (old, new))
-                .unwrap_or(("", versions));
+            let (current, candidate) = versions.split_once(" -> ").unwrap_or(("", versions));
             Some(PackageUpgrade {
                 name: name.to_owned(),
                 current: current.to_owned(),
