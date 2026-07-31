@@ -68,7 +68,15 @@ pub async fn crowdsec(config: &DaemonConfig) -> CrowdSecAlertsResponse {
 
 async fn read_alerts(cli: &str, maximum: usize) -> anyhow::Result<String> {
     let limit = maximum.to_string();
-    let args = ["alerts", "list", "-o", "json", "--limit", limit.as_str()];
+    let args = [
+        "alerts",
+        "list",
+        "-o",
+        "json",
+        "-a",
+        "--limit",
+        limit.as_str(),
+    ];
     let candidates = cscli_candidates(cli);
     let mut last_error = None;
 
@@ -82,7 +90,7 @@ async fn read_alerts(cli: &str, maximum: usize) -> anyhow::Result<String> {
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("cscli path is empty")))
 }
 
-async fn run_candidate(program: &str, args: [&str; 6]) -> anyhow::Result<String> {
+async fn run_candidate(program: &str, args: [&str; 7]) -> anyhow::Result<String> {
     let output = Command::new(program)
         .args(args)
         .kill_on_drop(true)
