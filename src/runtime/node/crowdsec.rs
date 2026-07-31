@@ -6,8 +6,6 @@ use serde_json::Value;
 use std::path::Path;
 use tokio::process::Command;
 
-const MAXIMUM_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-
 pub async fn crowdsec(config: &DaemonConfig) -> CrowdSecAlertsResponse {
     let enabled = std::env::var("AGAPORNIS_CROWDSEC_ENABLED")
         .ok()
@@ -43,16 +41,7 @@ pub async fn crowdsec(config: &DaemonConfig) -> CrowdSecAlertsResponse {
         Err(_) => return response(true, true, "unavailable", "CrowdSec query timed out"),
     };
 
-    if raw.len() > MAXIMUM_OUTPUT_BYTES {
-        return response(
-            true,
-            true,
-            "unavailable",
-            "CrowdSec output exceeded the 4 MiB safety limit",
-        );
-    }
-
-    let values = match parse_alerts(&raw) {
+    let values = match parse_alerts(&raw, maximum) {
         Ok(value) => value,
         Err(error) => return response(true, true, "unavailable", &error.to_string()),
     };
@@ -62,7 +51,7 @@ pub async fn crowdsec(config: &DaemonConfig) -> CrowdSecAlertsResponse {
         status: "active".into(),
         error_message: String::new(),
         collected_at: Utc::now().to_rfc3339(),
-        alerts: values.into_iter().take(maximum).map(map_alert).collect(),
+        alerts: values.into_iter().map(map_alert).collect(),
     }
 }
 
@@ -124,17 +113,19 @@ fn cscli_candidates(cli: &str) -> Vec<String> {
     ]
 }
 
-fn parse_alerts(raw: &str) -> anyhow::Result<Vec<Value>> {
+fn parse_alerts(raw: &str, maximum: usize) -> anyhow::Result<Vec<Value>> {
     let value: Value = serde_json::from_str(if raw.trim().is_empty() { "[]" } else { raw })
         .context("parse CrowdSec JSON")?;
-    if let Some(alerts) = value.as_array() {
-        return Ok(alerts.clone());
-    }
-    Ok(value
-        .get("alerts")
-        .and_then(Value::as_array)
+    let alerts = value
+        .as_array()
+        .or_else(|| value.get("alerts").and_then(Value::as_array));
+
+    Ok(alerts
+        .into_iter()
+        .flatten()
+        .take(maximum)
         .cloned()
-        .unwrap_or_default())
+        .collect())
 }
 
 fn response(enabled: bool, supported: bool, status: &str, error: &str) -> CrowdSecAlertsResponse {
@@ -199,21 +190,29 @@ mod tests {
 
     #[test]
     fn parses_top_level_alert_array() {
-        let alerts = parse_alerts(r#"[{"id":"1"}]"#).unwrap();
+        let alerts = parse_alerts(r#"[{"id":"1"}]"#, 100).unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].get("id").and_then(Value::as_str), Some("1"));
     }
 
     #[test]
     fn parses_nested_alert_array() {
-        let alerts = parse_alerts(r#"{"alerts":[{"id":"2"}]}"#).unwrap();
+        let alerts = parse_alerts(r#"{"alerts":[{"id":"2"}]}"#, 100).unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].get("id").and_then(Value::as_str), Some("2"));
     }
 
     #[test]
     fn rejects_invalid_json() {
-        assert!(parse_alerts("not json").is_err());
+        assert!(parse_alerts("not json", 100).is_err());
+    }
+
+    #[test]
+    fn limits_crowdsec_json_before_mapping() {
+        let alerts = parse_alerts(r#"[{"id":"1"},{"id":"2"},{"id":"3"}]"#, 2).unwrap();
+
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[1].get("id").and_then(Value::as_str), Some("2"));
     }
 
     #[test]

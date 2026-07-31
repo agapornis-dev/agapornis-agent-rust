@@ -95,7 +95,7 @@ See `.env.example`. Important settings include:
 - `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_PREFIX`, `S3_FORCE_PATH_STYLE`
 - `AGAPORNIS_CROWDSEC_ENABLED`, `AGAPORNIS_CROWDSEC_CLI_PATH`, `AGAPORNIS_CROWDSEC_MAX_ALERTS`
 
-CrowdSec telemetry is Linux-only and read-only. Leave `AGAPORNIS_CROWDSEC_CLI_PATH=cscli` unless `cscli` is installed in a custom location; the agent will pass `alerts list -o json -a --limit <max>` safely as arguments, including alerts from CAPI, and report successful reads as `active`.
+CrowdSec telemetry is Linux-only and read-only. Leave `AGAPORNIS_CROWDSEC_CLI_PATH=cscli` unless `cscli` is installed in a custom location; the agent will pass `alerts list -o json -a --limit <max>` safely as arguments, including alerts from CAPI, and report successful reads as `active`. Large JSON responses are normalized and cut off at `AGAPORNIS_CROWDSEC_MAX_ALERTS` instead of rejecting the complete response.
 - `AGAPORNIS_DOCKER_IMAGE_CLEANUP_ENABLED` (default `true`)
 - `AGAPORNIS_DOCKER_IMAGE_CLEANUP_INTERVAL_SECONDS` (default `21600`, every 6 hours)
 - `AGAPORNIS_DOCKER_IMAGE_CLEANUP_MIN_AGE_HOURS` (default `24`)
