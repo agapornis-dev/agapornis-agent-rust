@@ -51,7 +51,7 @@ pub async fn crowdsec(config: &DaemonConfig) -> CrowdSecAlertsResponse {
         status: "active".into(),
         error_message: String::new(),
         collected_at: Utc::now().to_rfc3339(),
-        alerts: values.into_iter().map(map_alert).collect(),
+        alerts: map_alerts(values, maximum),
     }
 }
 
@@ -142,35 +142,79 @@ fn response(enabled: bool, supported: bool, status: &str, error: &str) -> CrowdS
 fn text(value: &Value, names: &[&str]) -> String {
     names
         .iter()
-        .find_map(|name| value.get(*name).and_then(Value::as_str))
-        .unwrap_or("")
+        .find_map(|name| match value.get(*name) {
+            Some(Value::String(value)) => Some(value.clone()),
+            Some(Value::Number(value)) => Some(value.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default()
         .chars()
         .take(512)
         .collect()
 }
 
-fn map_alert(value: Value) -> CrowdSecAlert {
+fn first_text(primary: String, fallback: String) -> String {
+    if primary.is_empty() {
+        fallback
+    } else {
+        primary
+    }
+}
+
+fn map_alerts(values: Vec<Value>, maximum: usize) -> Vec<CrowdSecAlert> {
+    let mut mapped = Vec::with_capacity(maximum.min(values.len()));
+
+    for value in values {
+        let decisions = value.get("decisions").and_then(Value::as_array);
+        if let Some(decisions) = decisions.filter(|decisions| !decisions.is_empty()) {
+            for decision in decisions {
+                mapped.push(map_alert(&value, decision));
+                if mapped.len() == maximum {
+                    return mapped;
+                }
+            }
+        } else {
+            mapped.push(map_alert(&value, &Value::Null));
+            if mapped.len() == maximum {
+                return mapped;
+            }
+        }
+    }
+
+    mapped
+}
+
+fn map_alert(value: &Value, decision: &Value) -> CrowdSecAlert {
     let source = value.get("source").unwrap_or(&Value::Null);
-    let decision = value
-        .get("decisions")
-        .and_then(Value::as_array)
-        .and_then(|decisions| decisions.first())
-        .unwrap_or(&Value::Null);
+    let source_scope = first_text(text(source, &["scope"]), text(decision, &["scope"]));
+    let source_value = first_text(text(source, &["value"]), text(decision, &["value"]));
+    let source_ip = first_text(
+        text(source, &["ip"]),
+        if source_scope.eq_ignore_ascii_case("ip") {
+            source_value.clone()
+        } else {
+            String::new()
+        },
+    );
+
     CrowdSecAlert {
-        id: text(&value, &["id"]),
-        created_at: text(&value, &["created_at", "createdAt"]),
-        scenario: text(&value, &["scenario"]),
-        message: text(&value, &["message"]),
-        source_scope: text(source, &["scope"]),
-        source_value: text(source, &["value"]),
-        source_ip: text(source, &["ip"]),
+        id: first_text(text(decision, &["id"]), text(value, &["id"])),
+        created_at: first_text(
+            text(decision, &["created_at", "createdAt"]),
+            text(value, &["created_at", "createdAt"]),
+        ),
+        scenario: first_text(text(value, &["scenario"]), text(decision, &["scenario"])),
+        message: first_text(text(value, &["message"]), text(decision, &["origin"])),
+        source_scope,
+        source_value,
+        source_ip,
         source_country: text(source, &["cn", "country"]),
         source_as_name: text(source, &["as_name", "asName"]),
         events_count: value
             .get("events_count")
             .or_else(|| value.get("eventsCount"))
             .and_then(Value::as_i64)
-            .unwrap_or(0) as i32,
+            .unwrap_or(i64::from(!decision.is_null())) as i32,
         simulated: value
             .get("simulated")
             .and_then(Value::as_bool)
@@ -213,6 +257,37 @@ mod tests {
 
         assert_eq!(alerts.len(), 2);
         assert_eq!(alerts[1].get("id").and_then(Value::as_str), Some("2"));
+    }
+
+    #[test]
+    fn expands_capi_decisions_and_uses_their_sources() {
+        let values = parse_alerts(
+            r#"[{"id":10,"scenario":"crowdsecurity/community-blocklist","message":"update : +2/-0 IPs","decisions":[{"id":21,"origin":"CAPI","scope":"Ip","value":"192.0.2.1","type":"ban","duration":"24h"},{"id":22,"origin":"CAPI","scope":"Ip","value":"198.51.100.2","type":"ban","duration":"24h"}]}]"#,
+            100,
+        )
+        .unwrap();
+        let alerts = map_alerts(values, 100);
+
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0].id, "21");
+        assert_eq!(alerts[0].source_scope, "Ip");
+        assert_eq!(alerts[0].source_value, "192.0.2.1");
+        assert_eq!(alerts[0].source_ip, "192.0.2.1");
+        assert_eq!(alerts[0].events_count, 1);
+        assert_eq!(alerts[0].decision_type, "ban");
+        assert_eq!(alerts[1].id, "22");
+        assert_eq!(alerts[1].source_ip, "198.51.100.2");
+    }
+
+    #[test]
+    fn cuts_off_expanded_capi_decisions_at_the_configured_limit() {
+        let values = parse_alerts(
+            r#"[{"decisions":[{"scope":"Ip","value":"192.0.2.1"},{"scope":"Ip","value":"198.51.100.2"}]}]"#,
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(map_alerts(values, 1).len(), 1);
     }
 
     #[test]
